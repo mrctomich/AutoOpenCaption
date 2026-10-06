@@ -1,0 +1,12 @@
+# Personal test media and shortcuts — not part of the app
+Videos/
+
+# Manual backups of the app folder
+Archive/
+
+# Agent tooling
+.opencode/
+
+# OS junk
+Thumbs.db
+desktop.ini
