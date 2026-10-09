@@ -156,6 +156,40 @@ export function drawGroup(ctx, layoutGroup, activeWordId, style) {
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
 
+    // Active-word highlight box: drawn as a pre-pass so it sits behind ALL
+    // text (including neighbouring words' outlines), not just the active one.
+    // padding/radius are in 1080p-reference pixels, scaled with the caption.
+    const box = style.activeBox;
+    if (box && box.enabled && activeWordId != null) {
+        const unit = fontSize / 72;
+        for (const wl of layouts) {
+            if (wl.word.id !== activeWordId) continue;
+            const drawSize = wl.activeFontSize;
+            const pad = (box.padding || 0) * unit;
+            const r = Math.min((box.radius || 0) * unit, drawSize / 2 + pad);
+            const w = wl.activeW + pad * 2;
+            const h = drawSize + pad * 2;
+            // Center the box horizontally on the word's normal-text origin.
+            const bx = wl.x - pad;
+            const by = y - h / 2;
+            ctx.save();
+            ctx.fillStyle = box.color;
+            ctx.beginPath();
+            if (typeof ctx.roundRect === 'function') {
+                ctx.roundRect(bx, by, w, h, r);
+            } else {
+                ctx.moveTo(bx + r, by);
+                ctx.arcTo(bx + w, by, bx + w, by + h, r);
+                ctx.arcTo(bx + w, by + h, bx, by + h, r);
+                ctx.arcTo(bx, by + h, bx, by, r);
+                ctx.arcTo(bx, by, bx + w, by, r);
+                ctx.closePath();
+            }
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
     if (style.effects.shadow.enabled) {
         ctx.shadowColor = style.effects.shadow.color;
         ctx.shadowBlur = style.effects.shadow.size * scale;

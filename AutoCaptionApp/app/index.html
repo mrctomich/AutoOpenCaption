@@ -22,6 +22,42 @@
             <button id="btn-export-srt" class="btn-secondary" disabled>Export SRT</button>
             <button id="btn-export-vtt" class="btn-secondary" disabled>Export VTT</button>
             <button id="btn-generate" class="btn-accent" disabled>Generate Video</button>
+            <div class="render-settings-wrap" id="render-settings-wrap">
+                <button id="btn-render-settings" class="btn-secondary btn-gear" title="Video render settings" disabled>&#9881;</button>
+                <div id="render-settings-menu" class="render-settings-menu hidden">
+                    <div class="render-settings-title">Render Settings</div>
+                    <label>Frame Rate
+                        <select id="sel-render-fps">
+                            <option value="" selected>Same as source</option>
+                            <option value="24">24 fps</option>
+                            <option value="30">30 fps</option>
+                            <option value="60">60 fps</option>
+                        </select>
+                    </label>
+                    <label>Quality (CRF)
+                        <div class="slider-row">
+                            <input type="range" id="range-render-crf" min="14" max="32" value="18" title="Lower = better quality, bigger file">
+                            <input type="number" id="range-render-crf-num" min="14" max="32" value="18">
+                        </div>
+                    </label>
+                    <label>Encoding Speed
+                        <select id="sel-render-preset">
+                            <option value="ultrafast" selected>ultrafast (fastest, bigger file)</option>
+                            <option value="superfast">superfast</option>
+                            <option value="veryfast">veryfast</option>
+                            <option value="faster">faster</option>
+                            <option value="fast">fast</option>
+                        </select>
+                    </label>
+                    <label>Audio
+                        <select id="sel-render-audio">
+                            <option value="copy" selected>Copy source (no re-encode)</option>
+                            <option value="aac192">Re-encode AAC 192k</option>
+                            <option value="aac256">Re-encode AAC 256k</option>
+                        </select>
+                    </label>
+                </div>
+            </div>
             <button id="btn-theme-toggle" class="btn-theme-toggle" title="Toggle light/dark mode">&#9790;</button>
         </nav>
     </header>
@@ -256,6 +292,30 @@
                     </label>
                     <label>
                         <input type="checkbox" id="chk-bold" checked> Bold
+                    </label>
+
+                    <div class="style-divider"></div>
+
+                    <label>
+                        <input type="checkbox" id="chk-active-box"> Active Word Box
+                    </label>
+                    <label>Box Color
+                        <div class="color-row">
+                            <input type="color" id="color-active-box" value="#FF00CE">
+                            <input type="text" class="hex-input" id="hex-active-box" maxlength="7" spellcheck="false">
+                        </div>
+                    </label>
+                    <label>Box Size
+                        <div class="slider-row">
+                            <input type="range" id="range-active-box-pad" min="0" max="30" value="10">
+                            <input type="number" id="range-active-box-pad-num" min="0" max="30" value="10">
+                        </div>
+                    </label>
+                    <label>Box Roundness
+                        <div class="slider-row">
+                            <input type="range" id="range-active-box-radius" min="0" max="40" value="8">
+                            <input type="number" id="range-active-box-radius-num" min="0" max="40" value="8">
+                        </div>
                     </label>
                 </div>
 

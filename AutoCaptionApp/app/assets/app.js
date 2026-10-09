@@ -306,6 +306,7 @@ const App = {
             shadow: { enabled: false, color: '#000000', size: 5 },
             glow: { enabled: false, color: '#FF00CE', size: 5 }
         },
+        activeBox: { enabled: false, color: '#FF00CE', padding: 10, radius: 8 },
         grouping: { maxWords: 4, maxSeconds: 2.2, maxCharacters: 32 },
         position: { placement: 'lower-third', yPx: 780 }
     },
@@ -332,6 +333,7 @@ const App = {
         }
 
         this.bindEvents();
+        this.bindRenderSettings();
         this.loadPresets();
         this.bindKeyboardShortcuts();
         this.bindInspectorControls();
@@ -424,6 +426,11 @@ const App = {
             this.style.effects.glow.enabled = document.getElementById('chk-glow').checked;
             this.style.effects.glow.color = document.getElementById('color-glow').value;
             this.style.effects.glow.size = parseInt(document.getElementById('range-glow-size').value);
+            if (!this.style.activeBox) this.style.activeBox = { enabled: false, color: '#FF00CE', padding: 10, radius: 8 };
+            this.style.activeBox.enabled = document.getElementById('chk-active-box').checked;
+            this.style.activeBox.color = document.getElementById('color-active-box').value;
+            this.style.activeBox.padding = parseInt(document.getElementById('range-active-box-pad').value);
+            this.style.activeBox.radius = parseInt(document.getElementById('range-active-box-radius').value);
             this.style.grouping.maxWords = parseInt(document.getElementById('num-max-words').value);
             this.style.grouping.maxSeconds = parseFloat(document.getElementById('num-max-seconds').value);
             this.style.grouping.maxCharacters = parseInt(document.getElementById('num-max-chars').value);
@@ -447,7 +454,8 @@ const App = {
             ['color-active', 'hex-active'],
             ['color-outline', 'hex-outline'],
             ['color-shadow', 'hex-shadow'],
-            ['color-glow', 'hex-glow']
+            ['color-glow', 'hex-glow'],
+            ['color-active-box', 'hex-active-box']
         ];
         this._hexPairs = hexPairs;
         for (const [colorId, hexId] of hexPairs) {
@@ -472,6 +480,8 @@ const App = {
         };
         syncSliderNumber('range-main-size', 'range-main-size-num');
         syncSliderNumber('range-active-size', 'range-active-size-num');
+        syncSliderNumber('range-active-box-pad', 'range-active-box-pad-num');
+        syncSliderNumber('range-active-box-radius', 'range-active-box-radius-num');
         // Vertical position slider (0..1080 reference frame). Dragging it
         // away from a preset value switches the dropdown to "Custom".
         const placementSelect = document.getElementById('sel-placement');
@@ -660,10 +670,10 @@ const App = {
         const time = this.video.currentTime;
         const { width, height } = this.canvas;
         this.ctx.clearRect(0, 0, width, height);
-        if (!this.captionGroups.length) return;
+        if (!this.captionGroups.length) { this.highlightActiveWord(null); return; }
 
         const groupIndex = findGroupAtTime(this.captionGroups, time);
-        if (groupIndex < 0) return;
+        if (groupIndex < 0) { this.highlightActiveWord(null); return; }
 
         const group = this.captionGroups[groupIndex];
         const layout = this.captionLayout[groupIndex];
@@ -682,8 +692,31 @@ const App = {
 
         drawGroup(this.ctx, layout, activeWordId, this.style);
 
+        this.highlightActiveWord(activeWordId);
+
         if (this.debugOverlay) {
             drawDiagnostics(this.ctx, layout, groupIndex, activeWordIdx);
+        }
+    },
+
+    // Highlights the word chip matching the currently-spoken word while the
+    // video plays, and auto-scrolls the editor to keep it visible. Cheap
+    // class toggles only — no re-render, safe to call every animation frame.
+    highlightActiveWord(activeWordId) {
+        if (activeWordId === this._lastActiveWordId) return;
+        this._lastActiveWordId = activeWordId;
+        const editor = document.getElementById('word-selector');
+        const prev = editor.querySelector('.word-chip.playback-active');
+        if (prev) prev.classList.remove('playback-active');
+        if (activeWordId == null || !this.transcript) return;
+        const idx = this.transcript.words.findIndex(w => w.id === activeWordId && !w.deleted);
+        if (idx < 0) return;
+        const chip = editor.querySelector(`[data-index="${idx}"]`);
+        if (!chip) return;
+        chip.classList.add('playback-active');
+        // Only follow the playhead while playing so manual scrolling sticks.
+        if (this.video && !this.video.paused) {
+            chip.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
         }
     },
 
@@ -981,6 +1014,7 @@ const App = {
             document.getElementById('btn-export-srt').disabled = false;
             document.getElementById('btn-export-vtt').disabled = false;
             document.getElementById('btn-generate').disabled = false;
+            document.getElementById('btn-render-settings').disabled = false;
 
             Pipeline.complete('transcribe');
             Pipeline.complete('edit');
@@ -1274,28 +1308,90 @@ const App = {
         await FFmpegService.writeFile('concat.txt', new TextEncoder().encode(concatContent));
     },
 
+    // ── Render Settings (gear menu) ─────────────────────────
+    bindRenderSettings() {
+        const gear = document.getElementById('btn-render-settings');
+        const menu = document.getElementById('render-settings-menu');
+
+        gear.addEventListener('click', (e) => {
+            e.stopPropagation();
+            menu.classList.toggle('hidden');
+        });
+        // Clicking inside the menu must not close it; outside does.
+        menu.addEventListener('click', (e) => e.stopPropagation());
+        document.addEventListener('click', () => menu.classList.add('hidden'));
+
+        // Persist settings so the chosen quality survives reloads.
+        const ids = ['sel-render-fps', 'range-render-crf', 'sel-render-preset', 'sel-render-audio'];
+        try {
+            const saved = JSON.parse(localStorage.getItem('renderSettings') || 'null');
+            if (saved) {
+                for (const id of ids) {
+                    const el = document.getElementById(id);
+                    if (el && saved[id] != null) el.value = saved[id];
+                }
+            }
+        } catch { /* corrupt storage — ignore, use defaults */ }
+        const persist = () => {
+            const data = {};
+            for (const id of ids) data[id] = document.getElementById(id).value;
+            localStorage.setItem('renderSettings', JSON.stringify(data));
+        };
+        for (const id of ids) {
+            document.getElementById(id).addEventListener('change', persist);
+        }
+        const crfRange = document.getElementById('range-render-crf');
+        const crfNum = document.getElementById('range-render-crf-num');
+        crfNum.value = crfRange.value;
+        crfRange.addEventListener('input', () => { crfNum.value = crfRange.value; persist(); });
+        crfNum.addEventListener('input', () => { crfRange.value = crfNum.value; persist(); });
+    },
+
+    getRenderSettings() {
+        // fps '' = "Same as source": omit -r entirely so FFmpeg keeps the
+        // source frame rate (the original, always-correct behavior).
+        const fpsRaw = document.getElementById('sel-render-fps').value;
+        return {
+            fps: fpsRaw ? (parseInt(fpsRaw) || null) : null,
+            crf: parseInt(document.getElementById('range-render-crf').value) || 18,
+            preset: document.getElementById('sel-render-preset').value || 'ultrafast',
+            audio: document.getElementById('sel-render-audio').value || 'copy'
+        };
+    },
+
     async encodeVideo() {
         const inputData = await fetchFile(this.videoFile);
         await FFmpegService.writeFile('source.mp4', inputData);
 
-        // Try audio passthrough first; if the source audio codec isn't valid
-        // in MP4 (e.g. Opus/Vorbis source), fall back to AAC re-encoding.
-        // -preset ultrafast matters a lot in single-threaded WASM: at 1080p
-        // the default (medium) can run 10x+ slower for little visible gain
-        // at crf 18.
+        const rs = this.getRenderSettings();
+        // IMPORTANT: -r must ONLY be an output option here. Placing it before
+        // '-f concat' makes the concat demuxer ignore every 'duration' line,
+        // giving each PNG one frame slot at the chosen fps — the overlay then
+        // runs ~fps/10x too fast and overlay=shortest=1 truncates the video
+        // stream (e.g. 10s of video for a 30s overlay), producing a short,
+        // broken MP4 with exit code 0 and no error.
         const baseArgs = [
             '-i', 'source.mp4',
             '-f', 'concat', '-safe', '0',
             '-i', 'concat.txt',
             '-filter_complex', '[0:v][1:v]overlay=0:0:shortest=1',
-            '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18'
+            '-c:v', 'libx264', '-preset', rs.preset, '-crf', String(rs.crf)
         ];
+        if (rs.fps) baseArgs.push('-r', String(rs.fps));
 
-        let ret = await FFmpegService.exec([...baseArgs, '-c:a', 'copy', '-y', 'output.mp4']);
-        if (ret !== 0) {
-            Status.warning('Audio passthrough failed — re-encoding audio as AAC...');
-            await FFmpegService.deleteFile('output.mp4').catch(() => {});
-            ret = await FFmpegService.exec([...baseArgs, '-c:a', 'aac', '-b:a', '192k', '-y', 'output.mp4']);
+        let ret;
+        if (rs.audio === 'copy') {
+            // Audio passthrough first; if the source audio codec isn't valid
+            // in MP4 (e.g. Opus/Vorbis source), fall back to AAC re-encoding.
+            ret = await FFmpegService.exec([...baseArgs, '-c:a', 'copy', '-y', 'output.mp4']);
+            if (ret !== 0) {
+                Status.warning('Audio passthrough failed — re-encoding audio as AAC...');
+                await FFmpegService.deleteFile('output.mp4').catch(() => {});
+                ret = await FFmpegService.exec([...baseArgs, '-c:a', 'aac', '-b:a', '192k', '-y', 'output.mp4']);
+            }
+        } else {
+            const bitrate = rs.audio === 'aac256' ? '256k' : '192k';
+            ret = await FFmpegService.exec([...baseArgs, '-c:a', 'aac', '-b:a', bitrate, '-y', 'output.mp4']);
         }
         if (ret !== 0) {
             throw new Error(`FFmpeg exited with code ${ret} (source audio codec may be unsupported by ffmpeg.wasm)`);
@@ -1318,6 +1414,7 @@ const App = {
         }
 
         editor.innerHTML = '';
+        this._lastActiveWordId = null;
         this.transcript.words.forEach((word, i) => {
             const chip = document.createElement('span');
             chip.className = `word-chip ${word.deleted ? 'deleted' : ''} ${i === this.selectedWordIndex ? 'selected' : ''}`;
@@ -1363,12 +1460,11 @@ const App = {
         this.renderTranscriptEditor();
         this.updateInspector();
         
-        if (index >= 0 && this.transcript) {
+        // Clicking a word always moves the playhead to its start time,
+        // whether or not the video is playing — makes precise editing easy.
+        if (index >= 0 && this.transcript && this.video && this.video.src) {
             const word = this.transcript.words[index];
-            const video = document.getElementById('video-player');
-            if (video && !video.paused) {
-                video.currentTime = word.start;
-            }
+            this.video.currentTime = word.start;
         }
     },
 
@@ -1800,6 +1896,14 @@ const App = {
         document.getElementById('chk-glow').checked = preset.effects.glow.enabled;
         document.getElementById('color-glow').value = preset.effects.glow.color;
         document.getElementById('range-glow-size').value = preset.effects.glow.size;
+        // activeBox is a newer preset field — fall back to defaults for old presets.
+        const ab = preset.activeBox || { enabled: false, color: '#FF00CE', padding: 10, radius: 8 };
+        document.getElementById('chk-active-box').checked = !!ab.enabled;
+        document.getElementById('color-active-box').value = ab.color;
+        document.getElementById('range-active-box-pad').value = ab.padding;
+        document.getElementById('range-active-box-pad-num').value = ab.padding;
+        document.getElementById('range-active-box-radius').value = ab.radius;
+        document.getElementById('range-active-box-radius-num').value = ab.radius;
         document.getElementById('num-max-words').value = preset.grouping.maxWords;
         document.getElementById('num-max-seconds').value = preset.grouping.maxSeconds;
         document.getElementById('num-max-chars').value = preset.grouping.maxCharacters;
@@ -1814,6 +1918,7 @@ const App = {
         this.syncPlacementDropdown(yPx);
 
         Object.assign(this.style, JSON.parse(JSON.stringify(preset)));
+        this.style.activeBox = JSON.parse(JSON.stringify(ab));
         this.rebuildLayout();
         this.updatePreview();
         Status.success(`Preset loaded: ${name}`);
@@ -1833,6 +1938,7 @@ const App = {
             mainWeight: this.style.mainWeight,
             activeWordBold: this.style.activeWordBold,
             effects: JSON.parse(JSON.stringify(this.style.effects)),
+            activeBox: JSON.parse(JSON.stringify(this.style.activeBox || { enabled: false, color: '#FF00CE', padding: 10, radius: 8 })),
             grouping: JSON.parse(JSON.stringify(this.style.grouping)),
             position: JSON.parse(JSON.stringify(this.style.position))
         };

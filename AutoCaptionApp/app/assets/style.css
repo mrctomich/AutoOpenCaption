@@ -129,6 +129,81 @@ header nav {
     border-color: var(--accent);
 }
 
+/* ── Render Settings gear dropdown ─────────────────────── */
+.render-settings-wrap {
+    position: relative;
+}
+
+.btn-gear {
+    font-size: 15px;
+    line-height: 1;
+    padding: 7px 10px;
+}
+
+.render-settings-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 200;
+    width: 260px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+    padding: var(--space-2);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.render-settings-menu.hidden { display: none; }
+
+.render-settings-title {
+    font-size: var(--text-size-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+}
+
+.render-settings-menu label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: var(--text-size-sm);
+    color: var(--text-secondary);
+}
+
+.render-settings-menu select {
+    padding: 5px 8px;
+    background: var(--bg-page);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    border-radius: 4px;
+    font-size: var(--text-size-sm);
+    font-family: var(--font-sans);
+}
+
+.render-settings-menu .slider-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.render-settings-menu .slider-row input[type="range"] { flex: 1; }
+
+.render-settings-menu .slider-row input[type="number"] {
+    width: 52px;
+    padding: 4px 6px;
+    background: var(--bg-page);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    border-radius: 4px;
+    font-size: var(--text-size-sm);
+    font-family: var(--font-mono);
+    text-align: center;
+}
+
 .btn-accent:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn-accent:disabled { opacity: 0.4; cursor: not-allowed; }
 
@@ -631,6 +706,12 @@ main {
     border-color: var(--accent);
     background: var(--bg-panel-raised);
 }
+.word-chip.playback-active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+}
+.word-chip.playback-active .timestamp { color: var(--on-accent); opacity: 0.75; }
 .word-chip.deleted { opacity: 0.4; text-decoration: line-through; }
 
 .word-chip .word-text {
@@ -866,6 +947,13 @@ main {
     height: 1px;
     background: var(--border);
     margin: var(--space-1) 0;
+}
+
+/* Inside the flex-wrap style controls, a bare div collapses to 0 width —
+   force the divider to span the full panel. */
+.style-controls .style-divider {
+    width: 100%;
+    flex-basis: 100%;
 }
 
 .grouping-sublabel {
