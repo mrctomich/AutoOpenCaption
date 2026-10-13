@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoCaption</title>
+    <link rel="stylesheet" href="assets/style.css">
+    <script>
+        (function() {
+            var saved = localStorage.getItem('theme');
+            var theme = saved || 'dark';
+            document.documentElement.setAttribute('data-theme', theme);
+        })();
+    </script>
+</head>
+<body>
+    <header>
+        <h1>AutoCaption</h1>
+        <nav>
+            <button id="btn-import" class="btn-primary">Import Video</button>
+            <button id="btn-transcribe" class="btn-primary" disabled>Transcribe</button>
+            <button id="btn-export-srt" class="btn-secondary" disabled>Export SRT</button>
+            <button id="btn-export-vtt" class="btn-secondary" disabled>Export VTT</button>
+            <button id="btn-generate" class="btn-accent" disabled>Generate Video</button>
+            <div class="render-settings-wrap" id="render-settings-wrap">
+                <button id="btn-render-settings" class="btn-secondary btn-gear" title="Video render settings" disabled>&#9881;</button>
+                <div id="render-settings-menu" class="render-settings-menu hidden">
+                    <div class="render-settings-title">Render Settings</div>
+                    <label>Frame Rate
+                        <select id="sel-render-fps">
+                            <option value="" selected>Same as source</option>
+                            <option value="24">24 fps</option>
+                            <option value="30">30 fps</option>
+                            <option value="60">60 fps</option>
+                        </select>
+                    </label>
+                    <label>Quality (CRF)
+                        <div class="slider-row">
+                            <input type="range" id="range-render-crf" min="14" max="32" value="18" title="Lower = better quality, bigger file">
+                            <input type="number" id="range-render-crf-num" min="14" max="32" value="18">
+                        </div>
+                    </label>
+                    <label>Encoding Speed
+                        <select id="sel-render-preset">
+                            <option value="ultrafast" selected>ultrafast (fastest, bigger file)</option>
+                            <option value="superfast">superfast</option>
+                            <option value="veryfast">veryfast</option>
+                            <option value="faster">faster</option>
+                            <option value="fast">fast</option>
+                        </select>
+                    </label>
+                    <label>Audio
+                        <select id="sel-render-audio">
+                            <option value="copy" selected>Copy source (no re-encode)</option>
+                            <option value="aac192">Re-encode AAC 192k</option>
+                            <option value="aac256">Re-encode AAC 256k</option>
+                        </select>
+                    </label>
+                </div>
+            </div>
+            <button id="btn-theme-toggle" class="btn-theme-toggle" title="Toggle light/dark mode">&#9790;</button>
+        </nav>
+    </header>
+
+    <!-- Pipeline Status Bar -->
+    <div id="pipeline-bar" class="pipeline-bar">
+        <div class="pipeline-step" id="step-video" data-step="video">
+            <span class="step-icon"></span>
+            <span class="step-label">Import</span>
+        </div>
+        <div class="pipeline-connector"></div>
+        <div class="pipeline-step" id="step-model" data-step="model">
+            <span class="step-icon"></span>
+            <span class="step-label">Model</span>
+        </div>
+        <div class="pipeline-connector"></div>
+        <div class="pipeline-step" id="step-transcribe" data-step="transcribe">
+            <span class="step-icon"></span>
+            <span class="step-label">Transcribe</span>
+        </div>
+        <div class="pipeline-connector"></div>
+        <div class="pipeline-step" id="step-edit" data-step="edit">
+            <span class="step-icon"></span>
+            <span class="step-label">Edit</span>
+        </div>
+        <div class="pipeline-connector"></div>
+        <div class="pipeline-step" id="step-export" data-step="export">
+            <span class="step-icon"></span>
+            <span class="step-label">Export</span>
+        </div>
+    </div>
+
+    <main>
+        <!-- LEFT COLUMN: Transcript Toolbar + Preview -->
+        <div class="main-left">
+            <div class="transcript-toolbar">
+                <label>Language
+                    <select id="sel-language">
+                        <option value="en" selected>English</option>
+                        <option value="es">Spanish</option>
+                        <option value="fr">French</option>
+                        <option value="de">German</option>
+                        <option value="ja">Japanese</option>
+                    </select>
+                </label>
+                <label>Model
+                    <div class="model-select-row">
+                        <select id="sel-model">
+                            <option value="tiny">tiny (~39 MB)</option>
+                            <option value="base" selected>base (bundled)</option>
+                            <option value="small">small (~460 MB)</option>
+                        </select>
+                        <button id="btn-download-model" class="btn-secondary" title="Download model for offline use">Download</button>
+                        <button id="btn-transcribe-model" class="btn-accent" title="Transcribe the loaded video" hidden>Transcribe</button>
+                        <span id="model-status" class="model-status"></span>
+                    </div>
+                </label>
+            </div>
+
+            <section class="panel panel-preview">
+                <h2>Preview</h2>
+                <div class="video-container">
+                    <video id="video-player" controls></video>
+                    <canvas id="caption-overlay"></canvas>
+                    <div id="drop-zone" class="drop-zone">
+                        <p>Drag & drop a video file here<br>or click to import</p>
+                    </div>
+                </div>
+                <div class="transport">
+                    <button id="btn-play" disabled>&#9654;</button>
+                    <input type="range" id="scrubber" min="0" max="100" value="0" disabled>
+                    <span id="time-display">0:00 / 0:00</span>
+                </div>
+            </section>
+        </div>
+
+        <!-- CENTER COLUMN: Transcript Output + Word Editor (with Inspector) -->
+        <div class="main-center">
+            <section class="panel panel-transcript-display" id="panel-transcript-display">
+                <h2>Transcript Output
+                    <button id="btn-toggle-diagnostics" class="btn-toggle" title="Toggle details">Details</button>
+                </h2>
+                <div id="transcript-text" class="transcript-text">
+                    <p class="placeholder">No transcript yet. Import a video and click Transcribe.</p>
+                </div>
+                <div id="diagnostics" class="diagnostics hidden">
+                    <div class="diag-row"><span class="diag-label">Words:</span> <span id="diag-words">-</span></div>
+                    <div class="diag-row"><span class="diag-label">Groups:</span> <span id="diag-groups">-</span></div>
+                    <div class="diag-row"><span class="diag-label">Duration:</span> <span id="diag-duration">-</span></div>
+                    <div class="diag-row"><span class="diag-label">Model:</span> <span id="diag-model">-</span></div>
+                    <div class="diag-row"><span class="diag-label">Time:</span> <span id="diag-time">-</span></div>
+                    <div class="diag-row"><span class="diag-label">Samples:</span> <span id="diag-samples">-</span></div>
+                </div>
+            </section>
+
+            <div id="center-resizer" class="center-resizer" title="Drag to resize panels"></div>
+
+            <section class="panel panel-word-editor">
+                <h2>Word Editor</h2>
+                <div id="word-selector" class="word-selector">
+                    <p class="placeholder">Import a video and transcribe to see the transcript here.</p>
+                </div>
+                <div class="inspector-divider"></div>
+                <div class="inspector hidden" id="word-inspector">
+                    <div class="inspector-content">
+                        <div class="inspector-field">
+                            <label>Text</label>
+                            <input type="text" id="inspector-text" class="inspector-text-input" />
+                        </div>
+                        <div class="inspector-field">
+                            <label>Start</label>
+                            <div class="inspector-time-row">
+                                <input type="number" id="inspector-start" class="inspector-time-input" step="0.01" min="0" />
+                                <button id="inspector-start-minus" class="btn-nudge" title="-0.05s">-</button>
+                                <button id="inspector-start-plus" class="btn-nudge" title="+0.05s">+</button>
+                            </div>
+                        </div>
+                        <div class="inspector-field">
+                            <label>End</label>
+                            <div class="inspector-time-row">
+                                <input type="number" id="inspector-end" class="inspector-time-input" step="0.01" min="0" />
+                                <button id="inspector-end-minus" class="btn-nudge" title="-0.05s">-</button>
+                                <button id="inspector-end-plus" class="btn-nudge" title="+0.05s">+</button>
+                            </div>
+                        </div>
+                        <div class="inspector-actions">
+                            <button id="inspector-split" class="btn-secondary">Split</button>
+                            <button id="inspector-merge" class="btn-secondary">Merge Next</button>
+                            <button id="inspector-delete" class="btn-secondary btn-danger">Delete</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- RIGHT COLUMN: Style Library, Effects, Position, Caption Style (merged) -->
+        <div class="main-right">
+            <section class="panel panel-style-library">
+                <h2>Style Library</h2>
+                <div class="library-controls">
+                    <select id="sel-preset">
+                        <option value="">-- Select Preset --</option>
+                    </select>
+                    <button id="btn-load-preset" class="btn-secondary">Load</button>
+                    <button id="btn-save-preset" class="btn-secondary">Save</button>
+                    <button id="btn-delete-preset" class="btn-secondary">Delete</button>
+                    <button id="btn-export-preset" class="btn-secondary">Export</button>
+                    <button id="btn-import-preset" class="btn-secondary">Import</button>
+                    <input type="file" id="file-preset" accept=".json" hidden>
+                </div>
+            </section>
+
+            <section class="panel panel-effects">
+                <h2>Effects</h2>
+                <div class="effects-controls">
+                    <fieldset>
+                        <legend>Outline</legend>
+                        <label><input type="checkbox" id="chk-outline" checked> Enable</label>
+                        <label>Color <span class="color-row"><input type="color" id="color-outline" value="#05050A"><input type="text" class="hex-input" id="hex-outline" maxlength="7" spellcheck="false"></span></label>
+                        <label>Size <input type="range" id="range-outline-size" min="1" max="20" value="5"></label>
+                    </fieldset>
+                    <fieldset>
+                        <legend>Shadow</legend>
+                        <label><input type="checkbox" id="chk-shadow"> Enable</label>
+                        <label>Color <span class="color-row"><input type="color" id="color-shadow" value="#000000"><input type="text" class="hex-input" id="hex-shadow" maxlength="7" spellcheck="false"></span></label>
+                        <label>Size <input type="range" id="range-shadow-size" min="1" max="20" value="5"></label>
+                    </fieldset>
+                    <fieldset>
+                        <legend>Glow</legend>
+                        <label><input type="checkbox" id="chk-glow"> Enable</label>
+                        <label>Color <span class="color-row"><input type="color" id="color-glow" value="#7C3AED"><input type="text" class="hex-input" id="hex-glow" maxlength="7" spellcheck="false"></span></label>
+                        <label>Size <input type="range" id="range-glow-size" min="1" max="20" value="5"></label>
+                    </fieldset>
+                </div>
+            </section>
+
+            <section class="panel panel-position">
+                <h2>Position</h2>
+                <div class="position-controls">
+                    <label>Placement Presets
+                        <select id="sel-placement">
+                            <option value="lower-third">Lower Third</option>
+                            <option value="bottom">Bottom</option>
+                            <option value="center">Center</option>
+                            <option value="top">Top</option>
+                            <option value="custom" hidden>Custom</option>
+                        </select>
+                    </label>
+                    <label>Vertical Position
+                        <div class="slider-row">
+                            <input type="range" id="range-offset" min="0" max="1080" value="780">
+                            <input type="number" id="range-offset-num" min="0" max="1080" value="780">
+                        </div>
+                    </label>
+                </div>
+            </section>
+
+            <section class="panel panel-caption-style">
+                <h2>Caption Style</h2>
+                <div class="style-controls">
+                    <label>Font
+                        <select id="sel-font">
+                            <option value="Montserrat" selected>Montserrat</option>
+                            <option value="Arial">Arial</option>
+                            <option value="Impact">Impact</option>
+                            <option value="Georgia">Georgia</option>
+                        </select>
+                    </label>
+                    <label>Main Size
+                        <div class="slider-row">
+                            <input type="range" id="range-main-size" min="24" max="160" value="72">
+                            <input type="number" id="range-main-size-num" min="24" max="160" value="72">
+                        </div>
+                    </label>
+                    <label>Active Size
+                        <div class="slider-row">
+                            <input type="range" id="range-active-size" min="24" max="160" value="72">
+                            <input type="number" id="range-active-size-num" min="24" max="160" value="72">
+                        </div>
+                    </label>
+                    <label>Text Color
+                        <div class="color-row">
+                            <input type="color" id="color-text" value="#FFFFFF">
+                            <input type="text" class="hex-input" id="hex-text" maxlength="7" spellcheck="false">
+                        </div>
+                    </label>
+                    <label>Active Color
+                        <div class="color-row">
+                            <input type="color" id="color-active" value="#005288">
+                            <input type="text" class="hex-input" id="hex-active" maxlength="7" spellcheck="false">
+                        </div>
+                    </label>
+                    <label>
+                        <input type="checkbox" id="chk-bold" checked> Bold
+                    </label>
+
+                    <div class="style-divider"></div>
+
+                    <label>
+                        <input type="checkbox" id="chk-active-box"> Active Word Box
+                    </label>
+                    <label>Box Color
+                        <div class="color-row">
+                            <input type="color" id="color-active-box" value="#FF00CE">
+                            <input type="text" class="hex-input" id="hex-active-box" maxlength="7" spellcheck="false">
+                        </div>
+                    </label>
+                    <label>Box Size
+                        <div class="slider-row">
+                            <input type="range" id="range-active-box-pad" min="0" max="30" value="10">
+                            <input type="number" id="range-active-box-pad-num" min="0" max="30" value="10">
+                        </div>
+                    </label>
+                    <label>Box Roundness
+                        <div class="slider-row">
+                            <input type="range" id="range-active-box-radius" min="0" max="40" value="8">
+                            <input type="number" id="range-active-box-radius-num" min="0" max="40" value="8">
+                        </div>
+                    </label>
+                </div>
+
+                <div class="style-divider"></div>
+
+                <div class="grouping-sublabel">Grouping</div>
+                <div class="grouping-controls">
+                    <label>Max Words
+                        <input type="number" id="num-max-words" min="1" max="10" value="4">
+                    </label>
+                    <label>Max Seconds
+                        <input type="number" id="num-max-seconds" min="0.5" max="10" step="0.1" value="2.2">
+                    </label>
+                    <label>Max Characters
+                        <input type="number" id="num-max-chars" min="10" max="100" value="32">
+                    </label>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Status Bar (full-width bottom) -->
+    <div id="status-bar" class="status-bar">
+        <div id="status-bar-latest" class="status-bar-latest">
+            <span class="status-icon"></span>
+            <span class="status-msg">Ready</span>
+            <span class="view-log-label">View log &#9662;</span>
+        </div>
+        <div id="status-log-expanded" class="status-log-expanded"></div>
+    </div>
+
+    <!-- Progress Overlay -->
+    <div id="progress-overlay" class="progress-overlay hidden">
+        <div class="progress-card">
+            <div class="spinner"></div>
+            <h3 id="progress-title">Working...</h3>
+            <p id="progress-status"></p>
+            <div class="progress-bar-container" style="display:none">
+                <div class="progress-bar-track">
+                    <div class="progress-bar-fill" id="progress-bar-fill"></div>
+                </div>
+                <span id="progress-pct" class="progress-pct"></span>
+            </div>
+            <p id="progress-elapsed" class="progress-elapsed"></p>
+            <button id="btn-cancel-progress" class="btn-secondary btn-danger progress-cancel hidden">Cancel</button>
+        </div>
+    </div>
+
+    <!-- Transformers.js: load as module and expose globals -->
+    <script type="module">
+        import * as Transformers from './assets/transformers.umd.js';
+        window.Transformers = Transformers;
+        window.TransformersPipeline = Transformers.pipeline;
+        window.TransformersEnv = Transformers.env;
+        window.dispatchEvent(new Event('transformers-loaded'));
+    </script>
+
+    <!-- Main app (ES module) -->
+    <script type="module" src="assets/app.js"></script>
+</body>
+</html>
