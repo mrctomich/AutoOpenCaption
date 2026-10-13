@@ -212,6 +212,11 @@ export function drawGroup(ctx, layoutGroup, activeWordId, style) {
         if (style.effects.outline.enabled) {
             ctx.strokeStyle = style.effects.outline.color;
             ctx.lineWidth = style.effects.outline.size * scale;
+            // Rounded joins: the default 'miter' join extrapolates long sharp
+            // spikes at the tight-angle corners in letter outlines (worst on
+            // condensed fonts like Impact) once lineWidth grows large.
+            ctx.lineJoin = 'round';
+            ctx.miterLimit = 2;
             ctx.strokeText(wl.word.text, wl.x, y);
         }
 
