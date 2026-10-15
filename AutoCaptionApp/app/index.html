@@ -217,22 +217,52 @@
                         <legend>Outline</legend>
                         <label><input type="checkbox" id="chk-outline" checked> Enable</label>
                         <label>Color <span class="color-row"><input type="color" id="color-outline" value="#05050A"><input type="text" class="hex-input" id="hex-outline" maxlength="7" spellcheck="false"></span></label>
-                        <label>Size <input type="range" id="range-outline-size" min="1" max="20" value="13"></label>
+                        <label>Size
+                            <div class="slider-row">
+                                <input type="range" id="range-outline-size" min="1" max="20" value="13">
+                                <input type="number" id="range-outline-size-num" min="1" max="20" value="13">
+                            </div>
+                        </label>
                     </fieldset>
                     <fieldset>
                         <legend>Shadow</legend>
                         <label><input type="checkbox" id="chk-shadow"> Enable</label>
                         <label>Color <span class="color-row"><input type="color" id="color-shadow" value="#000000"><input type="text" class="hex-input" id="hex-shadow" maxlength="7" spellcheck="false"></span></label>
-                        <label>Opacity <input type="range" id="range-shadow-opacity" min="0" max="100" value="100"></label>
-                        <label>Direction <input type="range" id="range-shadow-direction" min="0" max="359" value="45"></label>
-                        <label>Distance <input type="range" id="range-shadow-distance" min="0" max="100" value="2"></label>
-                        <label>Softness <input type="range" id="range-shadow-softness" min="0" max="40" value="5"></label>
+                        <label>Opacity
+                            <div class="slider-row">
+                                <input type="range" id="range-shadow-opacity" min="0" max="100" value="100">
+                                <input type="number" id="range-shadow-opacity-num" min="0" max="100" value="100">
+                            </div>
+                        </label>
+                        <label>Direction
+                            <div class="slider-row">
+                                <input type="range" id="range-shadow-direction" min="0" max="359" value="45">
+                                <input type="number" id="range-shadow-direction-num" min="0" max="359" value="45">
+                            </div>
+                        </label>
+                        <label>Distance
+                            <div class="slider-row">
+                                <input type="range" id="range-shadow-distance" min="0" max="100" value="2">
+                                <input type="number" id="range-shadow-distance-num" min="0" max="100" value="2">
+                            </div>
+                        </label>
+                        <label>Softness
+                            <div class="slider-row">
+                                <input type="range" id="range-shadow-softness" min="0" max="40" value="5">
+                                <input type="number" id="range-shadow-softness-num" min="0" max="40" value="5">
+                            </div>
+                        </label>
                     </fieldset>
                     <fieldset>
                         <legend>Glow</legend>
                         <label><input type="checkbox" id="chk-glow"> Enable</label>
                         <label>Color <span class="color-row"><input type="color" id="color-glow" value="#7C3AED"><input type="text" class="hex-input" id="hex-glow" maxlength="7" spellcheck="false"></span></label>
-                        <label>Size <input type="range" id="range-glow-size" min="1" max="20" value="5"></label>
+                        <label>Size
+                            <div class="slider-row">
+                                <input type="range" id="range-glow-size" min="1" max="20" value="5">
+                                <input type="number" id="range-glow-size-num" min="1" max="20" value="5">
+                            </div>
+                        </label>
                     </fieldset>
                 </div>
             </section>

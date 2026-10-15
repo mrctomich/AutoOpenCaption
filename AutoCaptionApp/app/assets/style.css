@@ -921,17 +921,20 @@ main {
     font-size: var(--text-size-sm);
 }
 
-.style-controls .slider-row {
+.style-controls .slider-row,
+.effects-controls .slider-row {
     display: flex;
     align-items: center;
     gap: 6px;
 }
 
-.style-controls .slider-row input[type="range"] {
+.style-controls .slider-row input[type="range"],
+.effects-controls .slider-row input[type="range"] {
     width: 100px;
 }
 
-.style-controls .slider-row input[type="number"] {
+.style-controls .slider-row input[type="number"],
+.effects-controls .slider-row input[type="number"] {
     width: 56px;
     padding: 4px 6px;
     background: var(--bg-page);
