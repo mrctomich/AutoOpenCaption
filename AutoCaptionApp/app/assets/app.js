@@ -172,6 +172,8 @@ const Progress = {
     _cancelCb: null,
     _startTime: 0,
     _timer: null,
+    _loadedBytes: 0,
+    _totalBytes: 0,
 
     init() {
         this._overlay = document.getElementById('progress-overlay');
@@ -203,6 +205,8 @@ const Progress = {
         this._status.textContent = status || '';
         this._barContainer.style.display = 'none';
         this._spinner.style.display = '';
+        this._loadedBytes = 0;
+        this._totalBytes = 0;
         this._resetCancel();
         if (onCancel) {
             this._cancelCb = onCancel;
@@ -220,6 +224,8 @@ const Progress = {
         this._spinner.style.display = 'none';
         this._barFill.style.width = '0%';
         this._pct.textContent = '0%';
+        this._loadedBytes = 0;
+        this._totalBytes = 0;
         this._resetCancel();
         if (onCancel) {
             this._cancelCb = onCancel;
@@ -237,6 +243,17 @@ const Progress = {
         this._updateElapsed();
     },
 
+    // Feed raw download byte counts (from transformers.js progress events
+    // or estimated from the per-file fraction) so the elapsed line can
+    // show MB downloaded and throughput — a single model is several files
+    // and the per-file percentage alone tells you nothing about how much
+    // is left overall.
+    updateBytes(pct, loaded, total, status) {
+        if (typeof loaded === 'number' && loaded > 0) this._loadedBytes = loaded;
+        if (typeof total === 'number' && total > 0) this._totalBytes = total;
+        this.update(pct, status);
+    },
+
     hide() {
         this._overlay.classList.add('hidden');
         this._resetCancel();
@@ -245,9 +262,18 @@ const Progress = {
 
     _updateElapsed() {
         if (this._timer) cancelAnimationFrame(this._timer);
+        const fmtMB = (b) => `${(b / 1048576).toFixed(1)} MB`;
         const tick = () => {
-            const elapsed = ((performance.now() - this._startTime) / 1000).toFixed(0);
-            this._elapsed.textContent = `${elapsed}s elapsed`;
+            const totalSecs = Math.floor((performance.now() - this._startTime) / 1000);
+            const mm = Math.floor(totalSecs / 60);
+            const ss = totalSecs % 60;
+            let line = `${mm}:${String(ss).padStart(2, '0')} elapsed`;
+            if (this._totalBytes > 0) {
+                const rate = totalSecs > 0 ? this._loadedBytes / totalSecs : 0;
+                line += ` — ${fmtMB(this._loadedBytes)} / ${fmtMB(this._totalBytes)}`;
+                if (rate > 0) line += ` (${fmtMB(rate)}/s)`;
+            }
+            this._elapsed.textContent = line;
             if (!this._overlay.classList.contains('hidden')) {
                 this._timer = requestAnimationFrame(tick);
             }
@@ -893,6 +919,47 @@ const App = {
         return { samples: channelData, duration };
     },
 
+    // Shared model-download progress callback. A model is several files;
+    // transformers.js reports per-file progress with loaded/total BYTES, so
+    // we accumulate across files — otherwise the bar jumps to 100% when the
+    // first (small) file finishes while the multi-GB encoder is still going.
+    makeModelProgressCallback(modelId, isCancelled, basePct = 0, spanPct = 100) {
+        const files = {};   // file -> { loaded, total }
+        const overall = () => {
+            let loaded = 0, total = 0, allKnown = true;
+            for (const f of Object.values(files)) {
+                loaded += f.loaded;
+                if (f.total > 0) total += f.total; else allKnown = false;
+            }
+            return { loaded, total, allKnown };
+        };
+        const spanned = (fraction) => basePct + fraction * spanPct;
+        return (progress) => {
+            if (isCancelled()) throw { __cancelled: true };
+            const name = progress.file || progress.name || 'file';
+            if (progress.status === 'initiate' || progress.status === 'download') {
+                if (!files[name]) files[name] = { loaded: 0, total: 0 };
+                Progress.update(spanned(0), `Fetching ${name}...`);
+            } else if (progress.status === 'progress') {
+                const rec = files[name] || (files[name] = { loaded: 0, total: 0 });
+                if (typeof progress.loaded === 'number') rec.loaded = progress.loaded;
+                if (typeof progress.total === 'number' && progress.total > 0) rec.total = progress.total;
+                const o = overall();
+                const pct = (o.allKnown && o.total > 0)
+                    ? Math.min(1, o.loaded / o.total)
+                    : (rec.total > 0 ? Math.min(1, rec.loaded / rec.total) : 0);
+                Progress.updateBytes(spanned(pct), o.loaded, o.total,
+                    `Downloading ${modelId}: ${Math.round(pct * 100)}% (${name})`);
+            } else if (progress.status === 'done') {
+                const o = overall();
+                Progress.updateBytes(spanned(o.allKnown && o.total > 0 ? Math.min(1, o.loaded / o.total) : 1),
+                    o.loaded, o.total, `Finished ${name}`);
+            } else if (progress.status === 'ready' || progress.status === 'loading') {
+                Progress.update(spanned(1), 'Loading into memory...');
+            }
+        };
+    },
+
     // ── Download Model ──────────────────────────────────────
     async downloadModel() {
         const modelId = document.getElementById('sel-model').value;
@@ -910,6 +977,8 @@ const App = {
             if (!ok) return;
         }
 
+        let cancelled = false;
+
         try {
             btn.disabled = true;
             btn.textContent = 'Loading...';
@@ -917,19 +986,13 @@ const App = {
             Pipeline.activate('model');
             Status.setActive(`Loading ${modelName}...`);
 
-            Progress.showProgress('Loading Model', `${modelName}`);
-            // Transformers.js v3 progress statuses: initiate | download | progress | done | ready
-            // (progress.progress is a 0..1 fraction)
-            const progressCallback = (progress) => {
-                if (progress.status === 'initiate') {
-                    Progress.update(0, `Fetching ${progress.file || 'model file'}...`);
-                } else if (progress.status === 'progress' && typeof progress.progress === 'number') {
-                    const pct = Math.min(100, Math.max(0, progress.progress * 100));
-                    Progress.update(pct, `Downloading ${modelId}: ${Math.round(pct)}%`);
-                } else if (progress.status === 'ready' || progress.status === 'loading') {
-                    Progress.update(100, 'Loading into memory...');
-                }
-            };
+            Progress.showProgress('Loading Model', `${modelName}`, () => {
+                // Throwing from the next progress event unwinds the stream
+                // reader inside transformers.js and closes the connection.
+                cancelled = true;
+            });
+            // Transformers.js v3 progress statuses: initiate | download | progress | done | ready.
+            const progressCallback = this.makeModelProgressCallback(modelId, () => cancelled);
 
             await this.loadWhisper(modelId, progressCallback);
 
@@ -939,7 +1002,11 @@ const App = {
         } catch (err) {
             Progress.hide();
             Status.clearActive();
-            Status.error(`Model load failed: ${err.message}`);
+            if (err && err.__cancelled) {
+                Status.warning(`Download of ${modelId} cancelled`);
+            } else {
+                Status.error(`Model load failed: ${err.message}`);
+            }
             ModelStatus.clear();
             btn.disabled = false;
             btn.textContent = 'Download';
@@ -974,19 +1041,10 @@ const App = {
             if (loadedModelId !== modelId) {
                 const isBundled = modelId === 'base';
                 Progress.showProgress('Loading Model',
-                    isBundled ? 'Loading bundled base model...' : 'First run downloads from HuggingFace...');
-                // Transformers.js v3 emits: initiate | download | progress | done | ready
-                const progressCallback = (progress) => {
-                    if (cancelled) throw { __cancelled: true };
-                    if (progress.status === 'initiate') {
-                        Progress.update(10, `Fetching ${progress.file || 'model file'}...`);
-                    } else if (progress.status === 'progress' && typeof progress.progress === 'number') {
-                        const pct = Math.min(100, Math.max(0, progress.progress * 100));
-                        Progress.update(10 + pct * 0.4, `Downloading model: ${Math.round(pct)}%`);
-                    } else if (progress.status === 'ready' || progress.status === 'loading') {
-                        Progress.update(50, 'Loading model into memory...');
-                    }
-                };
+                    isBundled ? 'Loading bundled base model...' : 'First run downloads from HuggingFace...',
+                    () => { cancelled = true; });
+                // Accumulates bytes across all model files (base 10% → 50% span).
+                const progressCallback = this.makeModelProgressCallback(modelId, () => cancelled, 10, 40);
                 await this.loadWhisper(modelId, progressCallback);
                 if (cancelled) throw { __cancelled: true };
             }
