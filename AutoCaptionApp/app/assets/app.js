@@ -899,6 +899,17 @@ const App = {
         const modelName = `onnx-community/whisper-${modelId}_timestamped`;
         const btn = document.getElementById('btn-download-model');
 
+        // large-v3-turbo is a ~3 GB download — confirm before starting.
+        if (modelId === 'large-v3-turbo') {
+            const ok = confirm(
+                'The "large" model (Whisper large-v3-turbo) is a ~3 GB download ' +
+                'that is cached in your browser. It gives the best transcription ' +
+                'accuracy but needs a strong machine and a strong connection.\n\n' +
+                'Download now?'
+            );
+            if (!ok) return;
+        }
+
         try {
             btn.disabled = true;
             btn.textContent = 'Loading...';

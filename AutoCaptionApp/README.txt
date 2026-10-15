@@ -34,8 +34,8 @@ First-Time Use
 --------------
 The "base" Whisper model ships inside this zip (app/models/) and loads
 automatically when the app opens — no download needed to transcribe with
-base. The "tiny" and "small" models download from Hugging Face on first
-use and are cached in your browser afterward.
+base. The "tiny", "small", and "large" models download from Hugging Face
+on first use and are cached in your browser afterward.
 
 Note: presets are stored in your browser. After updating AutoCaption,
 previously-saved presets from an older version persist; clear site data
@@ -48,9 +48,12 @@ To clear the cache:
 
 Model Selection
 ---------------
-- tiny: ~39 MB, fastest, least accurate (downloads on first use)
+- tiny: ~65 MB, fastest, least accurate (downloads on first use)
 - base: bundled in this zip, good balance (default, loads automatically)
-- small: ~460 MB, slowest, most accurate (downloads on first use)
+- small: ~510 MB, accurate, slower (downloads on first use)
+- large: ~3 GB, Whisper large-v3-turbo — best accuracy, still fast;
+  needs a strong machine and a big one-time download (downloads on
+  first use)
 
 Export speed note: burned-in MP4 export runs FFmpeg single-threaded in
 WebAssembly; a 3-minute 1080p clip can take 15-30+ minutes depending on
