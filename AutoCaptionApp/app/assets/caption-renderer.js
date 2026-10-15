@@ -148,6 +148,17 @@ export function computeLayout(groups, style, canvasWidth, canvasHeight) {
     });
 }
 
+// '#rrggbb' / '#rgb' -> 'rgba(r,g,b,a)'. Non-hex colors pass through.
+function hexToRgba(hex, alpha) {
+    if (typeof hex !== 'string' || hex[0] !== '#') return hex;
+    let h = hex.slice(1);
+    if (h.length === 3) h = h.split('').map(c => c + c).join('');
+    if (h.length !== 6) return hex;
+    const n = parseInt(h, 16);
+    if (Number.isNaN(n)) return hex;
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+}
+
 export function drawGroup(ctx, layoutGroup, activeWordId, style) {
     if (!layoutGroup) return;
 
@@ -191,10 +202,20 @@ export function drawGroup(ctx, layoutGroup, activeWordId, style) {
     }
 
     if (style.effects.shadow.enabled) {
-        ctx.shadowColor = style.effects.shadow.color;
-        ctx.shadowBlur = style.effects.shadow.size * scale;
-        ctx.shadowOffsetX = 2 * scale;
-        ctx.shadowOffsetY = 2 * scale;
+        const sh = style.effects.shadow;
+        // Legacy presets only have `size` (used as blur, opaque color,
+        // fixed 2px down-right offset). Fall back to that look when the
+        // newer fields are absent.
+        const opacity = (sh.opacity != null ? sh.opacity : 100) / 100;
+        const dirDeg = sh.direction != null ? sh.direction : 45;
+        const distance = sh.distance != null ? sh.distance : 2.83; // legacy offset was (2,2)
+        const softness = sh.softness != null ? sh.softness : (sh.size != null ? sh.size : 5);
+        // 0° = shadow straight down (light from above), increasing clockwise.
+        const rad = dirDeg * Math.PI / 180;
+        ctx.shadowColor = hexToRgba(sh.color, opacity);
+        ctx.shadowBlur = softness * scale;
+        ctx.shadowOffsetX = Math.sin(rad) * distance * scale;
+        ctx.shadowOffsetY = Math.cos(rad) * distance * scale;
     }
 
     if (style.effects.glow.enabled) {

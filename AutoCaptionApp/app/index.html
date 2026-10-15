@@ -217,13 +217,16 @@
                         <legend>Outline</legend>
                         <label><input type="checkbox" id="chk-outline" checked> Enable</label>
                         <label>Color <span class="color-row"><input type="color" id="color-outline" value="#05050A"><input type="text" class="hex-input" id="hex-outline" maxlength="7" spellcheck="false"></span></label>
-                        <label>Size <input type="range" id="range-outline-size" min="1" max="20" value="5"></label>
+                        <label>Size <input type="range" id="range-outline-size" min="1" max="20" value="13"></label>
                     </fieldset>
                     <fieldset>
                         <legend>Shadow</legend>
                         <label><input type="checkbox" id="chk-shadow"> Enable</label>
                         <label>Color <span class="color-row"><input type="color" id="color-shadow" value="#000000"><input type="text" class="hex-input" id="hex-shadow" maxlength="7" spellcheck="false"></span></label>
-                        <label>Size <input type="range" id="range-shadow-size" min="1" max="20" value="5"></label>
+                        <label>Opacity <input type="range" id="range-shadow-opacity" min="0" max="100" value="100"></label>
+                        <label>Direction <input type="range" id="range-shadow-direction" min="0" max="359" value="45"></label>
+                        <label>Distance <input type="range" id="range-shadow-distance" min="0" max="100" value="2"></label>
+                        <label>Softness <input type="range" id="range-shadow-softness" min="0" max="40" value="5"></label>
                     </fieldset>
                     <fieldset>
                         <legend>Glow</legend>
@@ -286,7 +289,7 @@
                     </label>
                     <label>Active Color
                         <div class="color-row">
-                            <input type="color" id="color-active" value="#005288">
+                            <input type="color" id="color-active" value="#FFFFFF">
                             <input type="text" class="hex-input" id="hex-active" maxlength="7" spellcheck="false">
                         </div>
                     </label>
@@ -297,11 +300,11 @@
                     <div class="style-divider"></div>
 
                     <label>
-                        <input type="checkbox" id="chk-active-box"> Active Word Box
+                        <input type="checkbox" id="chk-active-box" checked> Active Word Box
                     </label>
                     <label>Box Color
                         <div class="color-row">
-                            <input type="color" id="color-active-box" value="#FF00CE">
+                            <input type="color" id="color-active-box" value="#005288">
                             <input type="text" class="hex-input" id="hex-active-box" maxlength="7" spellcheck="false">
                         </div>
                     </label>
@@ -324,7 +327,7 @@
                 <div class="grouping-sublabel">Grouping</div>
                 <div class="grouping-controls">
                     <label>Max Words
-                        <input type="number" id="num-max-words" min="1" max="10" value="4">
+                        <input type="number" id="num-max-words" min="1" max="10" value="3">
                     </label>
                     <label>Max Seconds
                         <input type="number" id="num-max-seconds" min="0.5" max="10" step="0.1" value="2.2">
