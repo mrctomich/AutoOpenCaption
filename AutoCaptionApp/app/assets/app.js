@@ -485,6 +485,13 @@ const App = {
         syncSliderNumber('range-active-size', 'range-active-size-num');
         syncSliderNumber('range-active-box-pad', 'range-active-box-pad-num');
         syncSliderNumber('range-active-box-radius', 'range-active-box-radius-num');
+        // Effects sliders also get typed-number boxes (same pattern as above).
+        syncSliderNumber('range-outline-size', 'range-outline-size-num');
+        syncSliderNumber('range-shadow-opacity', 'range-shadow-opacity-num');
+        syncSliderNumber('range-shadow-direction', 'range-shadow-direction-num');
+        syncSliderNumber('range-shadow-distance', 'range-shadow-distance-num');
+        syncSliderNumber('range-shadow-softness', 'range-shadow-softness-num');
+        syncSliderNumber('range-glow-size', 'range-glow-size-num');
         // Vertical position slider (0..1080 reference frame). Dragging it
         // away from a preset value switches the dropdown to "Custom".
         const placementSelect = document.getElementById('sel-placement');
@@ -1897,18 +1904,28 @@ const App = {
         document.getElementById('chk-outline').checked = preset.effects.outline.enabled;
         document.getElementById('color-outline').value = preset.effects.outline.color;
         document.getElementById('range-outline-size').value = preset.effects.outline.size;
+        document.getElementById('range-outline-size-num').value = preset.effects.outline.size;
         document.getElementById('chk-shadow').checked = preset.effects.shadow.enabled;
         document.getElementById('color-shadow').value = preset.effects.shadow.color;
         // Shadow gained opacity/direction/distance/softness — migrate legacy
         // {size}-only presets to the equivalent new look.
         const sh = preset.effects.shadow;
-        document.getElementById('range-shadow-opacity').value = sh.opacity != null ? sh.opacity : 100;
-        document.getElementById('range-shadow-direction').value = sh.direction != null ? sh.direction : 45;
-        document.getElementById('range-shadow-distance').value = sh.distance != null ? sh.distance : 2.83;
-        document.getElementById('range-shadow-softness').value = sh.softness != null ? sh.softness : (sh.size != null ? sh.size : 5);
+        const shOpacity = sh.opacity != null ? sh.opacity : 100;
+        const shDirection = sh.direction != null ? sh.direction : 45;
+        const shDistance = sh.distance != null ? sh.distance : 2.83;
+        const shSoftness = sh.softness != null ? sh.softness : (sh.size != null ? sh.size : 5);
+        document.getElementById('range-shadow-opacity').value = shOpacity;
+        document.getElementById('range-shadow-opacity-num').value = shOpacity;
+        document.getElementById('range-shadow-direction').value = shDirection;
+        document.getElementById('range-shadow-direction-num').value = shDirection;
+        document.getElementById('range-shadow-distance').value = shDistance;
+        document.getElementById('range-shadow-distance-num').value = shDistance;
+        document.getElementById('range-shadow-softness').value = shSoftness;
+        document.getElementById('range-shadow-softness-num').value = shSoftness;
         document.getElementById('chk-glow').checked = preset.effects.glow.enabled;
         document.getElementById('color-glow').value = preset.effects.glow.color;
         document.getElementById('range-glow-size').value = preset.effects.glow.size;
+        document.getElementById('range-glow-size-num').value = preset.effects.glow.size;
         // activeBox is a newer preset field — fall back to defaults for old presets.
         const ab = preset.activeBox || { enabled: false, color: '#FF00CE', padding: 10, radius: 8 };
         document.getElementById('chk-active-box').checked = !!ab.enabled;
