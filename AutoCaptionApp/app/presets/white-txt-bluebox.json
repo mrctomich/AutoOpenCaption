@@ -1,0 +1,45 @@
+{
+  "name": "WhiteTxtBlueBox",
+  "font": "Montserrat",
+  "mainSize": 72,
+  "activeSize": 72,
+  "textColor": "#ffffff",
+  "activeColor": "#ffffff",
+  "mainWeight": "bold",
+  "activeWordBold": true,
+  "effects": {
+    "outline": {
+      "enabled": true,
+      "color": "#05050a",
+      "size": 13
+    },
+    "shadow": {
+      "enabled": false,
+      "color": "#000000",
+      "opacity": 100,
+      "direction": 45,
+      "distance": 2,
+      "softness": 5
+    },
+    "glow": {
+      "enabled": false,
+      "color": "#7c3aed",
+      "size": 5
+    }
+  },
+  "activeBox": {
+    "enabled": true,
+    "color": "#005288",
+    "padding": 10,
+    "radius": 8
+  },
+  "grouping": {
+    "maxWords": 3,
+    "maxSeconds": 2.2,
+    "maxCharacters": 32
+  },
+  "position": {
+    "placement": "lower-third",
+    "yPx": 780
+  }
+}

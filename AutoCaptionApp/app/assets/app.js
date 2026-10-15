@@ -293,21 +293,21 @@ const App = {
         audioDuration: null
     },
     style: {
-        name: 'VCG Magenta Pop',
+        name: 'WhiteTxtBlueBox',
         font: 'Montserrat',
         mainSize: 72,
-        activeSize: 78,
+        activeSize: 72,
         textColor: '#FFFFFF',
-        activeColor: '#005288',
+        activeColor: '#FFFFFF',
         mainWeight: 'bold',
         activeWordBold: true,
         effects: {
-            outline: { enabled: true, color: '#05050A', size: 5 },
-            shadow: { enabled: false, color: '#000000', size: 5 },
-            glow: { enabled: false, color: '#FF00CE', size: 5 }
+            outline: { enabled: true, color: '#05050A', size: 13 },
+            shadow: { enabled: false, color: '#000000', opacity: 100, direction: 45, distance: 2, softness: 5 },
+            glow: { enabled: false, color: '#7C3AED', size: 5 }
         },
-        activeBox: { enabled: false, color: '#FF00CE', padding: 10, radius: 8 },
-        grouping: { maxWords: 4, maxSeconds: 2.2, maxCharacters: 32 },
+        activeBox: { enabled: true, color: '#005288', padding: 10, radius: 8 },
+        grouping: { maxWords: 3, maxSeconds: 2.2, maxCharacters: 32 },
         position: { placement: 'lower-third', yPx: 780 }
     },
 
@@ -422,7 +422,10 @@ const App = {
             this.style.effects.outline.size = parseInt(document.getElementById('range-outline-size').value);
             this.style.effects.shadow.enabled = document.getElementById('chk-shadow').checked;
             this.style.effects.shadow.color = document.getElementById('color-shadow').value;
-            this.style.effects.shadow.size = parseInt(document.getElementById('range-shadow-size').value);
+            this.style.effects.shadow.opacity = parseInt(document.getElementById('range-shadow-opacity').value);
+            this.style.effects.shadow.direction = parseInt(document.getElementById('range-shadow-direction').value);
+            this.style.effects.shadow.distance = parseInt(document.getElementById('range-shadow-distance').value);
+            this.style.effects.shadow.softness = parseInt(document.getElementById('range-shadow-softness').value);
             this.style.effects.glow.enabled = document.getElementById('chk-glow').checked;
             this.style.effects.glow.color = document.getElementById('color-glow').value;
             this.style.effects.glow.size = parseInt(document.getElementById('range-glow-size').value);
@@ -1821,7 +1824,10 @@ const App = {
                 getAll.onsuccess = () => {
                     this.presets = getAll.result;
                     this.populatePresetDropdown();
-                    if (this.presets.length === 0) this.loadFactoryPresets();
+                    // Seed any factory preset the DB doesn't have yet (first
+                    // run, or a preset added in a later version). Existing
+                    // presets are never overwritten, so user edits survive.
+                    this.loadFactoryPresets();
                     resolve();
                 };
             };
@@ -1842,6 +1848,7 @@ const App = {
 
     async loadFactoryPresets() {
         const presetFiles = [
+            'presets/white-txt-bluebox.json',
             'presets/vcg-magenta-pop.json',
             'presets/classic-white.json',
             'presets/tiktok-bold.json'
@@ -1892,7 +1899,13 @@ const App = {
         document.getElementById('range-outline-size').value = preset.effects.outline.size;
         document.getElementById('chk-shadow').checked = preset.effects.shadow.enabled;
         document.getElementById('color-shadow').value = preset.effects.shadow.color;
-        document.getElementById('range-shadow-size').value = preset.effects.shadow.size;
+        // Shadow gained opacity/direction/distance/softness — migrate legacy
+        // {size}-only presets to the equivalent new look.
+        const sh = preset.effects.shadow;
+        document.getElementById('range-shadow-opacity').value = sh.opacity != null ? sh.opacity : 100;
+        document.getElementById('range-shadow-direction').value = sh.direction != null ? sh.direction : 45;
+        document.getElementById('range-shadow-distance').value = sh.distance != null ? sh.distance : 2.83;
+        document.getElementById('range-shadow-softness').value = sh.softness != null ? sh.softness : (sh.size != null ? sh.size : 5);
         document.getElementById('chk-glow').checked = preset.effects.glow.enabled;
         document.getElementById('color-glow').value = preset.effects.glow.color;
         document.getElementById('range-glow-size').value = preset.effects.glow.size;
