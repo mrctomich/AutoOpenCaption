@@ -1823,20 +1823,23 @@ const App = {
                     db.createObjectStore('presets', { keyPath: 'name' });
                 }
             };
-            request.onsuccess = (e) => {
+            request.onsuccess = async (e) => {
                 this.db = e.target.result;
+                // Seed missing factory presets FIRST (insert-only), then read
+                // the list once. Previously this called loadFactoryPresets()
+                // which itself called loadPresets() — an infinite loop that
+                // kept rebuilding the dropdown and reset the user's
+                // selection back to "-- Select Preset --".
+                await this.seedFactoryPresets();
                 const tx = this.db.transaction('presets', 'readonly');
                 const store = tx.objectStore('presets');
                 const getAll = store.getAll();
                 getAll.onsuccess = () => {
                     this.presets = getAll.result;
                     this.populatePresetDropdown();
-                    // Seed any factory preset the DB doesn't have yet (first
-                    // run, or a preset added in a later version). Existing
-                    // presets are never overwritten, so user edits survive.
-                    this.loadFactoryPresets();
                     resolve();
                 };
+                getAll.onerror = () => resolve();
             };
             request.onerror = () => resolve();
         });
@@ -1844,6 +1847,7 @@ const App = {
 
     populatePresetDropdown() {
         const select = document.getElementById('sel-preset');
+        const previous = select.value;
         select.innerHTML = '<option value="">-- Select Preset --</option>';
         this.presets.forEach(preset => {
             const opt = document.createElement('option');
@@ -1851,9 +1855,14 @@ const App = {
             opt.textContent = preset.name;
             select.appendChild(opt);
         });
+        // Keep the current selection across a rebuild (e.g. after save or
+        // import) as long as the preset still exists.
+        if (previous && this.presets.some(p => p.name === previous)) {
+            select.value = previous;
+        }
     },
 
-    async loadFactoryPresets() {
+    async seedFactoryPresets() {
         const presetFiles = [
             'presets/white-txt-bluebox.json',
             'presets/vcg-magenta-pop.json',
@@ -1861,18 +1870,26 @@ const App = {
             'presets/tiktok-bold.json'
         ];
 
+        // Insert-only: existing presets are never overwritten, so user
+        // edits and deletions survive app restarts.
+        const existing = await new Promise((resolve) => {
+            const tx = this.db.transaction('presets', 'readonly');
+            const getAllKeys = tx.objectStore('presets').getAllKeys();
+            getAllKeys.onsuccess = () => resolve(new Set(getAllKeys.result));
+            getAllKeys.onerror = () => resolve(new Set());
+        });
+
         for (const file of presetFiles) {
             try {
                 const resp = await fetch(file);
-                if (resp.ok) {
-                    const preset = await resp.json();
-                    await this.savePresetToDB(preset);
-                }
+                if (!resp.ok) continue;
+                const preset = await resp.json();
+                if (existing.has(preset.name)) continue;
+                await this.savePresetToDB(preset);
             } catch (e) {
                 console.warn('Failed to load factory preset:', file, e);
             }
         }
-        await this.loadPresets();
     },
 
     async savePresetToDB(preset) {
