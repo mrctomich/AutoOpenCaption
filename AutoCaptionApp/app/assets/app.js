@@ -265,9 +265,14 @@ const Progress = {
         const fmtMB = (b) => `${(b / 1048576).toFixed(1)} MB`;
         const tick = () => {
             const totalSecs = Math.floor((performance.now() - this._startTime) / 1000);
-            const mm = Math.floor(totalSecs / 60);
+            // HH:MM:SS — a 1 GB model download can legitimately pass an hour
+            // on a slow connection, and mm:ss reads as "still 12 minutes"
+            // after 72 have gone by.
+            const hh = Math.floor(totalSecs / 3600);
+            const mm = Math.floor((totalSecs % 3600) / 60);
             const ss = totalSecs % 60;
-            let line = `${mm}:${String(ss).padStart(2, '0')} elapsed`;
+            const pad = (n) => String(n).padStart(2, '0');
+            let line = `${pad(hh)}:${pad(mm)}:${pad(ss)} elapsed`;
             if (this._totalBytes > 0) {
                 const rate = totalSecs > 0 ? this._loadedBytes / totalSecs : 0;
                 line += ` — ${fmtMB(this._loadedBytes)} / ${fmtMB(this._totalBytes)}`;
@@ -283,6 +288,18 @@ const Progress = {
 };
 
 // ── Model Status ────────────────────────────────────────────
+// Customer-facing model name shown in the download dialog (the HF repo id
+// "onnx-community/whisper-large-v3-turbo_timestamped" is not a name).
+const MODEL_DISPLAY_NAMES = {
+    'tiny': 'Whisper tiny',
+    'base': 'Whisper base',
+    'small': 'Whisper small',
+    'large-v3-turbo': 'Whisper large-v3-turbo'
+};
+function modelDisplayName(modelId) {
+    return MODEL_DISPLAY_NAMES[modelId] || `Whisper ${modelId}`;
+}
+
 const ModelStatus = {
     _el: null,
 
@@ -929,65 +946,117 @@ const App = {
         return { samples: channelData, duration };
     },
 
+    // Verified per-file download sizes (bytes) for exactly the files each
+    // model loads with the dtypes in loadWhisper() — large-v3-turbo uses
+    // q8 for both ONNX files, the others an fp32 encoder + q8 decoder.
+    // Measured live from the Hugging Face file trees (onnx-community/
+    // whisper-<id>_timestamped, October 2026). Seeding totals from this
+    // map means the progress bar divides by the REAL model size from the
+    // first byte — no guessing at files that haven't reported a size yet
+    // (the old placeholder heuristic ran 25% when half the bytes were
+    // already down) — and files served from the browser cache count as
+    // completed bytes instead of vanishing from both sides of the ratio.
+    MODEL_FILE_SIZES: {
+        'large-v3-turbo': {
+            'encoder_model_quantized.onnx': 644883359,
+            'decoder_model_merged_quantized.onnx': 439997434,
+        },
+        'small': {
+            'encoder_model.onnx': 352791798,
+            'decoder_model_merged_quantized.onnx': 156795750,
+        },
+        'base': {
+            'encoder_model.onnx': 82451730,
+            'decoder_model_merged_quantized.onnx': 53712708,
+        },
+        'tiny': {
+            'encoder_model.onnx': 32894434,
+            'decoder_model_merged_quantized.onnx': 30730264,
+        },
+    },
+
     // Shared model-download progress callback. A model is several files;
     // transformers.js reports per-file progress with loaded/total BYTES, so
     // we accumulate across files — otherwise the bar jumps to 100% when the
     // first (small) file finishes while the big encoder is still going.
     makeModelProgressCallback(modelId, isCancelled, basePct = 0, spanPct = 100) {
-        const files = {};   // file -> { loaded, total }
+        const seeded = this.MODEL_FILE_SIZES[modelId] || {};
+        const files = {};   // name -> { loaded, total, done }
+        // Seed EVERY known file up front, not just when an event first
+        // touches it: the denominator is exact from the very first event
+        // (no false 100% when a tiny config file completes before the
+        // ONNX files have even been initiated), and a cached file firing
+        // 'ready' while others are still pending cannot fake all-done.
+        for (const [name, size] of Object.entries(seeded))
+            files[name] = { loaded: 0, total: size, done: false };
+        let shownFrac = 0;  // high-water bar fraction (see show())
+        const touch = (name) => files[name] || (files[name] = {
+            loaded: 0, total: seeded[name] || 0, done: false,
+        });
         const overall = () => {
-            let loaded = 0, total = 0, allKnown = true;
+            let loaded = 0, total = 0, allDone = true;
             for (const f of Object.values(files)) {
                 loaded += f.loaded;
-                if (f.total > 0) total += f.total; else allKnown = false;
+                total += f.total;
+                if (!f.done) allDone = false;
             }
-            return { loaded, total, allKnown };
+            return { loaded, total, allDone };
         };
-        // High-water mark so the bar never moves backwards, but a fraction
-        // based on an incomplete file list may only climb to 99.5% — 100% is
-        // reserved for when every file's size is known, otherwise a cached
-        // file's "ready" event used to slam the bar to full mid-download.
-        let highWater = 0;
-        const show = (fraction, allKnown) => {
-            const capped = Math.min(1, Math.max(0, fraction));
-            highWater = Math.max(highWater, allKnown ? capped : Math.min(capped, 0.995));
-            return basePct + highWater * spanPct;
+        // Bar fraction = bytes arrived / total across all files. Seeded
+        // sizes (above) make that total exact for our models the instant
+        // any file touches; config/tokenizer files report their real size
+        // on their first progress event. A file whose size stays unknown
+        // counts on neither side, so the fraction never overstates. Until
+        // every file reports done the bar is capped at 99.5% — 100% is
+        // reserved for the all-done moment, never earlier. The high-water
+        // mark only smooths tiny self-corrections as real sizes replace
+        // seeds; it cannot lock in a false 100% because of the cap.
+        const show = () => {
+            const { loaded, total, allDone } = overall();
+            let frac = total > 0 ? loaded / total : 0;
+            if (frac > 1) frac = 1;
+            if (!allDone && frac > 0.995) frac = 0.995;
+            if (frac > shownFrac) shownFrac = frac;
+            return { loaded, total, allDone };
         };
         return (progress) => {
             if (isCancelled()) throw { __cancelled: true };
             // progress.file looks like "onnx/decoder_model_merged_q8.onnx" —
             // show just the file name, the full path is noise in the status line.
             const name = (progress.file || progress.name || 'file').split('/').pop();
+            const rec = touch(name);
             if (progress.status === 'initiate' || progress.status === 'download') {
-                if (!files[name]) files[name] = { loaded: 0, total: 0 };
-                const o = overall();
-                const pct = o.total > 0 ? o.loaded / o.total : 0;
-                Progress.updateBytes(show(pct, o.allKnown), o.loaded, o.total, `Fetching ${name}...`);
+                const o = show();
+                Progress.updateBytes(basePct + shownFrac * spanPct, o.loaded, o.total,
+                    `Fetching ${name}...`);
             } else if (progress.status === 'progress') {
-                const rec = files[name] || (files[name] = { loaded: 0, total: 0 });
                 if (typeof progress.loaded === 'number') rec.loaded = progress.loaded;
                 if (typeof progress.total === 'number' && progress.total > 0) rec.total = progress.total;
-                const o = overall();
-                const pct = (o.allKnown && o.total > 0)
-                    ? o.loaded / o.total
-                    : (rec.total > 0 ? rec.loaded / rec.total : 0);
-                Progress.updateBytes(show(pct, o.allKnown), o.loaded,
-                    Math.max(o.total, o.loaded),
-                    `Downloading ${modelId}: ${Math.round(Math.min(1, pct) * 100)}% (${name})`);
+                const o = show();
+                Progress.updateBytes(basePct + shownFrac * spanPct, o.loaded, o.total,
+                    `Downloading ${modelDisplayName(modelId)}: ${Math.round(shownFrac * 100)}% (${name})`);
             } else if (progress.status === 'done') {
-                const rec = files[name] || (files[name] = { loaded: 0, total: 0 });
+                // 'progress' events throttle and can end below total; a
+                // finished file's real size is its total (or its last
+                // loaded count when the size was never reported).
                 if (rec.total > 0) rec.loaded = rec.total;
-                const o = overall();
-                const pct = o.total > 0 ? o.loaded / o.total : 1;
-                Progress.updateBytes(show(pct, o.allKnown), o.loaded,
-                    Math.max(o.total, o.loaded), `Finished ${name}`);
+                else if (rec.loaded > 0) rec.total = rec.loaded;
+                rec.done = true;
+                const o = show();
+                Progress.updateBytes(basePct + shownFrac * spanPct, o.loaded, o.total,
+                    `Finished ${name}`);
             } else if (progress.status === 'ready' || progress.status === 'loading') {
-                // A cached file became ready — other files may still be
-                // downloading, so keep showing the accumulated fraction.
-                const o = overall();
-                const pct = o.total > 0 ? o.loaded / o.total : 0;
-                Progress.updateBytes(show(pct, o.allKnown), o.loaded,
-                    Math.max(o.total, o.loaded), 'Loading into memory...');
+                // 'ready' fires PER FILE as each one lands in memory. A
+                // file served from the browser cache fires it without ever
+                // reporting bytes — count it as fully downloaded (its seed
+                // size) so the bar still reflects the whole model when only
+                // part of it needs fetching. "Loading into memory..." is
+                // claimed only once every file is done, never mid-download.
+                if (rec.total > 0 && rec.loaded === 0) rec.loaded = rec.total;
+                rec.done = true;
+                const o = show();
+                Progress.updateBytes(basePct + shownFrac * spanPct, o.loaded, o.total,
+                    o.allDone ? 'Loading into memory...' : `${name} ready`);
             }
         };
     },
@@ -1018,7 +1087,13 @@ const App = {
             Pipeline.activate('model');
             Status.setActive(`Downloading ${modelName}...`);
 
-            Progress.showProgress('Downloading Model', `${modelName}`, () => {
+            // Initial line shows the customer-facing name and the expected
+            // total size; exact byte totals appear within seconds once the
+            // first files report their Content-Length.
+            const SIZE_HINTS = { 'tiny': '~65 MB', 'base': 'bundled',
+                'small': '~490 MB', 'large-v3-turbo': '~1.04 GB' };
+            Progress.showProgress('Downloading Model',
+                `${modelDisplayName(modelId)} — ${SIZE_HINTS[modelId] || 'size unknown'}`, () => {
                 // Throwing from the next progress event unwinds the stream
                 // reader inside transformers.js and closes the connection.
                 cancelled = true;
