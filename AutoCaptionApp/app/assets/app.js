@@ -814,11 +814,21 @@ const App = {
         // local server instead of hitting HuggingFace (fast start, and works
         // with no internet at all). Other models download and get cached.
         env.allowRemoteModels = modelId !== 'base';
+        // large-v3-turbo must use the quantized encoder: its fp32 encoder is
+        // a 0.5 MB stub whose weights live in a separate 2.4 GB
+        // encoder_model.onnx_data file that bypasses progress reporting (bar
+        // jumped to 100% after the decoder while the data file still streamed
+        // uncounted, and Cancel never fired). The _quantized encoder is one
+        // self-contained 615 MB file, so the whole model is ~1.04 GB and
+        // every byte is tracked.
+        const dtype = modelId === 'large-v3-turbo'
+            ? 'q8'
+            : { encoder_model: 'fp32', decoder_model_merged: 'q8' };
         whisperPipeline = await pipeline(
             'automatic-speech-recognition',
             modelName,
             {
-                dtype: { encoder_model: 'fp32', decoder_model_merged: 'q8' },
+                dtype: dtype,
                 progress_callback: progressCallback || undefined
             }
         );
@@ -922,7 +932,7 @@ const App = {
     // Shared model-download progress callback. A model is several files;
     // transformers.js reports per-file progress with loaded/total BYTES, so
     // we accumulate across files — otherwise the bar jumps to 100% when the
-    // first (small) file finishes while the multi-GB encoder is still going.
+    // first (small) file finishes while the big encoder is still going.
     makeModelProgressCallback(modelId, isCancelled, basePct = 0, spanPct = 100) {
         const files = {};   // file -> { loaded, total }
         const overall = () => {
@@ -933,29 +943,51 @@ const App = {
             }
             return { loaded, total, allKnown };
         };
-        const spanned = (fraction) => basePct + fraction * spanPct;
+        // High-water mark so the bar never moves backwards, but a fraction
+        // based on an incomplete file list may only climb to 99.5% — 100% is
+        // reserved for when every file's size is known, otherwise a cached
+        // file's "ready" event used to slam the bar to full mid-download.
+        let highWater = 0;
+        const show = (fraction, allKnown) => {
+            const capped = Math.min(1, Math.max(0, fraction));
+            highWater = Math.max(highWater, allKnown ? capped : Math.min(capped, 0.995));
+            return basePct + highWater * spanPct;
+        };
         return (progress) => {
             if (isCancelled()) throw { __cancelled: true };
-            const name = progress.file || progress.name || 'file';
+            // progress.file looks like "onnx/decoder_model_merged_q8.onnx" —
+            // show just the file name, the full path is noise in the status line.
+            const name = (progress.file || progress.name || 'file').split('/').pop();
             if (progress.status === 'initiate' || progress.status === 'download') {
                 if (!files[name]) files[name] = { loaded: 0, total: 0 };
-                Progress.update(spanned(0), `Fetching ${name}...`);
+                const o = overall();
+                const pct = o.total > 0 ? o.loaded / o.total : 0;
+                Progress.updateBytes(show(pct, o.allKnown), o.loaded, o.total, `Fetching ${name}...`);
             } else if (progress.status === 'progress') {
                 const rec = files[name] || (files[name] = { loaded: 0, total: 0 });
                 if (typeof progress.loaded === 'number') rec.loaded = progress.loaded;
                 if (typeof progress.total === 'number' && progress.total > 0) rec.total = progress.total;
                 const o = overall();
                 const pct = (o.allKnown && o.total > 0)
-                    ? Math.min(1, o.loaded / o.total)
-                    : (rec.total > 0 ? Math.min(1, rec.loaded / rec.total) : 0);
-                Progress.updateBytes(spanned(pct), o.loaded, o.total,
-                    `Downloading ${modelId}: ${Math.round(pct * 100)}% (${name})`);
+                    ? o.loaded / o.total
+                    : (rec.total > 0 ? rec.loaded / rec.total : 0);
+                Progress.updateBytes(show(pct, o.allKnown), o.loaded,
+                    Math.max(o.total, o.loaded),
+                    `Downloading ${modelId}: ${Math.round(Math.min(1, pct) * 100)}% (${name})`);
             } else if (progress.status === 'done') {
+                const rec = files[name] || (files[name] = { loaded: 0, total: 0 });
+                if (rec.total > 0) rec.loaded = rec.total;
                 const o = overall();
-                Progress.updateBytes(spanned(o.allKnown && o.total > 0 ? Math.min(1, o.loaded / o.total) : 1),
-                    o.loaded, o.total, `Finished ${name}`);
+                const pct = o.total > 0 ? o.loaded / o.total : 1;
+                Progress.updateBytes(show(pct, o.allKnown), o.loaded,
+                    Math.max(o.total, o.loaded), `Finished ${name}`);
             } else if (progress.status === 'ready' || progress.status === 'loading') {
-                Progress.update(spanned(1), 'Loading into memory...');
+                // A cached file became ready — other files may still be
+                // downloading, so keep showing the accumulated fraction.
+                const o = overall();
+                const pct = o.total > 0 ? o.loaded / o.total : 0;
+                Progress.updateBytes(show(pct, o.allKnown), o.loaded,
+                    Math.max(o.total, o.loaded), 'Loading into memory...');
             }
         };
     },
@@ -966,10 +998,10 @@ const App = {
         const modelName = `onnx-community/whisper-${modelId}_timestamped`;
         const btn = document.getElementById('btn-download-model');
 
-        // large-v3-turbo is a ~3 GB download — confirm before starting.
+        // large-v3-turbo is a ~1 GB download (quantized) — confirm before starting.
         if (modelId === 'large-v3-turbo') {
             const ok = confirm(
-                'The "large" model (Whisper large-v3-turbo) is a ~3 GB download ' +
+                'The "large" model (Whisper large-v3-turbo) is a ~1 GB download ' +
                 'that is cached in your browser. It gives the best transcription ' +
                 'accuracy but needs a strong machine and a strong connection.\n\n' +
                 'Download now?'
@@ -981,12 +1013,12 @@ const App = {
 
         try {
             btn.disabled = true;
-            btn.textContent = 'Loading...';
-            ModelStatus.set('downloading', 'Loading');
+            btn.textContent = 'Downloading...';
+            ModelStatus.set('downloading', 'Downloading');
             Pipeline.activate('model');
-            Status.setActive(`Loading ${modelName}...`);
+            Status.setActive(`Downloading ${modelName}...`);
 
-            Progress.showProgress('Loading Model', `${modelName}`, () => {
+            Progress.showProgress('Downloading Model', `${modelName}`, () => {
                 // Throwing from the next progress event unwinds the stream
                 // reader inside transformers.js and closes the connection.
                 cancelled = true;
@@ -1040,7 +1072,7 @@ const App = {
 
             if (loadedModelId !== modelId) {
                 const isBundled = modelId === 'base';
-                Progress.showProgress('Loading Model',
+                Progress.showProgress(isBundled ? 'Loading Model' : 'Downloading Model',
                     isBundled ? 'Loading bundled base model...' : 'First run downloads from HuggingFace...',
                     () => { cancelled = true; });
                 // Accumulates bytes across all model files (base 10% → 50% span).
