@@ -1,6 +1,7 @@
 import { FFmpegService } from './ffmpeg-service.js';
 import { whisperToTranscript } from './whisper-adapter.js';
 import { groupWords, findGroupAtTime, computeLayout, drawGroup, drawDiagnostics } from './caption-renderer.js';
+import { installResumableFetch } from './resumable-fetch.js';
 
 const waitForTransformers = () => new Promise((resolve) => {
     if (window.TransformersPipeline) {
@@ -42,6 +43,21 @@ env.backends.onnx.wasm.proxy = true;
 // Serve ONNX Runtime WASM from the local vendor folder instead of the jsdelivr
 // CDN, so transcription works in locked-down IT environments with no internet.
 env.backends.onnx.wasm.wasmPaths = new URL('assets/', document.baseURI).href;
+
+// HuggingFace's CDN drops long connections mid-file (net::ERR_CONNECTION_CLOSED
+// a few hundred MB into the large model's encoder), and transformers.js has no
+// resume: every dropout restarted the whole download and the tab eventually
+// died. installResumableFetch wraps fetch() for huggingface.co downloads,
+// spooling bytes to OPFS with automatic Range-retry resume (across drops AND
+// page reloads — clicking Download again picks up where it stopped). Because
+// the shim's OPFS files ARE the model cache, disable transformers.js's own
+// CacheStorage layer: leaving it on made a second ~1 GB copy in memory.
+if (navigator.storage && navigator.storage.getDirectory) {
+    env.useBrowserCache = false;
+    installResumableFetch({ log: (m) => console.info('[download]', m) });
+} else {
+    console.warn('OPFS unavailable in this browser — model downloads will not be resumable');
+}
 
 let whisperPipeline = null;
 let loadedModelId = null;
@@ -172,6 +188,8 @@ const Progress = {
     _cancelCb: null,
     _startTime: 0,
     _timer: null,
+    _loadedBytes: 0,
+    _totalBytes: 0,
 
     init() {
         this._overlay = document.getElementById('progress-overlay');
@@ -203,6 +221,8 @@ const Progress = {
         this._status.textContent = status || '';
         this._barContainer.style.display = 'none';
         this._spinner.style.display = '';
+        this._loadedBytes = 0;
+        this._totalBytes = 0;
         this._resetCancel();
         if (onCancel) {
             this._cancelCb = onCancel;
@@ -220,6 +240,8 @@ const Progress = {
         this._spinner.style.display = 'none';
         this._barFill.style.width = '0%';
         this._pct.textContent = '0%';
+        this._loadedBytes = 0;
+        this._totalBytes = 0;
         this._resetCancel();
         if (onCancel) {
             this._cancelCb = onCancel;
@@ -237,6 +259,17 @@ const Progress = {
         this._updateElapsed();
     },
 
+    // Feed raw download byte counts (from transformers.js progress events
+    // or estimated from the per-file fraction) so the elapsed line can
+    // show MB downloaded and throughput — a single model is several files
+    // and the per-file percentage alone tells you nothing about how much
+    // is left overall.
+    updateBytes(pct, loaded, total, status) {
+        if (typeof loaded === 'number' && loaded > 0) this._loadedBytes = loaded;
+        if (typeof total === 'number' && total > 0) this._totalBytes = total;
+        this.update(pct, status);
+    },
+
     hide() {
         this._overlay.classList.add('hidden');
         this._resetCancel();
@@ -245,9 +278,23 @@ const Progress = {
 
     _updateElapsed() {
         if (this._timer) cancelAnimationFrame(this._timer);
+        const fmtMB = (b) => `${(b / 1048576).toFixed(1)} MB`;
         const tick = () => {
-            const elapsed = ((performance.now() - this._startTime) / 1000).toFixed(0);
-            this._elapsed.textContent = `${elapsed}s elapsed`;
+            const totalSecs = Math.floor((performance.now() - this._startTime) / 1000);
+            // HH:MM:SS — a 1 GB model download can legitimately pass an hour
+            // on a slow connection, and mm:ss reads as "still 12 minutes"
+            // after 72 have gone by.
+            const hh = Math.floor(totalSecs / 3600);
+            const mm = Math.floor((totalSecs % 3600) / 60);
+            const ss = totalSecs % 60;
+            const pad = (n) => String(n).padStart(2, '0');
+            let line = `${pad(hh)}:${pad(mm)}:${pad(ss)} elapsed`;
+            if (this._totalBytes > 0) {
+                const rate = totalSecs > 0 ? this._loadedBytes / totalSecs : 0;
+                line += ` — ${fmtMB(this._loadedBytes)} / ${fmtMB(this._totalBytes)}`;
+                if (rate > 0) line += ` (${fmtMB(rate)}/s)`;
+            }
+            this._elapsed.textContent = line;
             if (!this._overlay.classList.contains('hidden')) {
                 this._timer = requestAnimationFrame(tick);
             }
@@ -257,6 +304,18 @@ const Progress = {
 };
 
 // ── Model Status ────────────────────────────────────────────
+// Customer-facing model name shown in the download dialog (the HF repo id
+// "onnx-community/whisper-large-v3-turbo_timestamped" is not a name).
+const MODEL_DISPLAY_NAMES = {
+    'tiny': 'Whisper tiny',
+    'base': 'Whisper base',
+    'small': 'Whisper small',
+    'large-v3-turbo': 'Whisper large-v3-turbo'
+};
+function modelDisplayName(modelId) {
+    return MODEL_DISPLAY_NAMES[modelId] || `Whisper ${modelId}`;
+}
+
 const ModelStatus = {
     _el: null,
 
@@ -788,11 +847,21 @@ const App = {
         // local server instead of hitting HuggingFace (fast start, and works
         // with no internet at all). Other models download and get cached.
         env.allowRemoteModels = modelId !== 'base';
+        // large-v3-turbo must use the quantized encoder: its fp32 encoder is
+        // a 0.5 MB stub whose weights live in a separate 2.4 GB
+        // encoder_model.onnx_data file that bypasses progress reporting (bar
+        // jumped to 100% after the decoder while the data file still streamed
+        // uncounted, and Cancel never fired). The _quantized encoder is one
+        // self-contained 615 MB file, so the whole model is ~1.04 GB and
+        // every byte is tracked.
+        const dtype = modelId === 'large-v3-turbo'
+            ? 'q8'
+            : { encoder_model: 'fp32', decoder_model_merged: 'q8' };
         whisperPipeline = await pipeline(
             'automatic-speech-recognition',
             modelName,
             {
-                dtype: { encoder_model: 'fp32', decoder_model_merged: 'q8' },
+                dtype: dtype,
                 progress_callback: progressCallback || undefined
             }
         );
@@ -893,32 +962,168 @@ const App = {
         return { samples: channelData, duration };
     },
 
+    // Verified per-file download sizes (bytes) for exactly the files each
+    // model loads with the dtypes in loadWhisper() — large-v3-turbo uses
+    // q8 for both ONNX files, the others an fp32 encoder + q8 decoder.
+    // Measured live from the Hugging Face file trees (onnx-community/
+    // whisper-<id>_timestamped, October 2026). Seeding totals from this
+    // map means the progress bar divides by the REAL model size from the
+    // first byte — no guessing at files that haven't reported a size yet
+    // (the old placeholder heuristic ran 25% when half the bytes were
+    // already down) — and files served from the browser cache count as
+    // completed bytes instead of vanishing from both sides of the ratio.
+    MODEL_FILE_SIZES: {
+        'large-v3-turbo': {
+            'encoder_model_quantized.onnx': 644883359,
+            'decoder_model_merged_quantized.onnx': 439997434,
+        },
+        'small': {
+            'encoder_model.onnx': 352791798,
+            'decoder_model_merged_quantized.onnx': 156795750,
+        },
+        'base': {
+            'encoder_model.onnx': 82451730,
+            'decoder_model_merged_quantized.onnx': 53712708,
+        },
+        'tiny': {
+            'encoder_model.onnx': 32894434,
+            'decoder_model_merged_quantized.onnx': 30730264,
+        },
+    },
+
+    // Shared model-download progress callback. A model is several files;
+    // transformers.js reports per-file progress with loaded/total BYTES, so
+    // we accumulate across files — otherwise the bar jumps to 100% when the
+    // first (small) file finishes while the big encoder is still going.
+    makeModelProgressCallback(modelId, isCancelled, basePct = 0, spanPct = 100) {
+        const seeded = this.MODEL_FILE_SIZES[modelId] || {};
+        const files = {};   // name -> { loaded, total, done }
+        // Seed EVERY known file up front, not just when an event first
+        // touches it: the denominator is exact from the very first event
+        // (no false 100% when a tiny config file completes before the
+        // ONNX files have even been initiated), and a cached file firing
+        // 'ready' while others are still pending cannot fake all-done.
+        for (const [name, size] of Object.entries(seeded))
+            files[name] = { loaded: 0, total: size, done: false };
+        let shownFrac = 0;  // high-water bar fraction (see show())
+        const touch = (name) => files[name] || (files[name] = {
+            loaded: 0, total: seeded[name] || 0, done: false,
+        });
+        const overall = () => {
+            let loaded = 0, total = 0, allDone = true;
+            for (const f of Object.values(files)) {
+                loaded += f.loaded;
+                total += f.total;
+                if (!f.done) allDone = false;
+            }
+            return { loaded, total, allDone };
+        };
+        // Bar fraction = bytes arrived / total across all files. Seeded
+        // sizes (above) make that total exact for our models the instant
+        // any file touches; config/tokenizer files report their real size
+        // on their first progress event. A file whose size stays unknown
+        // counts on neither side, so the fraction never overstates. Until
+        // every file reports done the bar is capped at 99.5% — 100% is
+        // reserved for the all-done moment, never earlier. The high-water
+        // mark only smooths tiny self-corrections as real sizes replace
+        // seeds; it cannot lock in a false 100% because of the cap.
+        const show = () => {
+            const { loaded, total, allDone } = overall();
+            let frac = total > 0 ? loaded / total : 0;
+            if (frac > 1) frac = 1;
+            if (!allDone && frac > 0.995) frac = 0.995;
+            if (frac > shownFrac) shownFrac = frac;
+            return { loaded, total, allDone };
+        };
+        return (progress) => {
+            if (isCancelled()) throw { __cancelled: true };
+            // progress.file looks like "onnx/decoder_model_merged_q8.onnx" —
+            // show just the file name, the full path is noise in the status line.
+            const name = (progress.file || progress.name || 'file').split('/').pop();
+            const rec = touch(name);
+            if (progress.status === 'initiate' || progress.status === 'download') {
+                const o = show();
+                Progress.updateBytes(basePct + shownFrac * spanPct, o.loaded, o.total,
+                    `Fetching ${name}...`);
+            } else if (progress.status === 'progress') {
+                if (typeof progress.loaded === 'number') rec.loaded = progress.loaded;
+                if (typeof progress.total === 'number' && progress.total > 0) rec.total = progress.total;
+                const o = show();
+                Progress.updateBytes(basePct + shownFrac * spanPct, o.loaded, o.total,
+                    `Downloading ${modelDisplayName(modelId)}: ${Math.round(shownFrac * 100)}% (${name})`);
+            } else if (progress.status === 'done') {
+                // 'progress' events throttle and can end below total; a
+                // finished file's real size is its total (or its last
+                // loaded count when the size was never reported).
+                if (rec.total > 0) rec.loaded = rec.total;
+                else if (rec.loaded > 0) rec.total = rec.loaded;
+                rec.done = true;
+                const o = show();
+                Progress.updateBytes(basePct + shownFrac * spanPct, o.loaded, o.total,
+                    `Finished ${name}`);
+            } else if (progress.status === 'ready' || progress.status === 'loading') {
+                // 'ready' fires PER FILE as each one lands in memory. A
+                // file served from the browser cache fires it without ever
+                // reporting bytes — count it as fully downloaded (its seed
+                // size) so the bar still reflects the whole model when only
+                // part of it needs fetching. "Loading into memory..." is
+                // claimed only once every file is done, never mid-download.
+                if (rec.total > 0 && rec.loaded === 0) rec.loaded = rec.total;
+                rec.done = true;
+                const o = show();
+                Progress.updateBytes(basePct + shownFrac * spanPct, o.loaded, o.total,
+                    o.allDone ? 'Loading into memory...' : `${name} ready`);
+            }
+        };
+    },
+
     // ── Download Model ──────────────────────────────────────
     async downloadModel() {
         const modelId = document.getElementById('sel-model').value;
         const modelName = `onnx-community/whisper-${modelId}_timestamped`;
         const btn = document.getElementById('btn-download-model');
 
+        // large-v3-turbo is a ~1 GB download (quantized) — confirm before starting.
+        if (modelId === 'large-v3-turbo') {
+            const ok = confirm(
+                'The "large" model (Whisper large-v3-turbo) is a ~1 GB download ' +
+                'that is cached on this machine. It gives the best transcription ' +
+                'accuracy but needs a strong machine and a strong connection.\n\n' +
+                'If the download is ever interrupted, just click Download again — ' +
+                'it resumes from where it stopped instead of starting over.\n\n' +
+                'Download now?'
+            );
+            if (!ok) return;
+        }
+
+        let cancelled = false;
+
         try {
             btn.disabled = true;
-            btn.textContent = 'Loading...';
-            ModelStatus.set('downloading', 'Loading');
+            btn.textContent = 'Downloading...';
+            ModelStatus.set('downloading', 'Downloading');
             Pipeline.activate('model');
-            Status.setActive(`Loading ${modelName}...`);
+            Status.setActive(`Downloading ${modelName}...`);
 
-            Progress.showProgress('Loading Model', `${modelName}`);
-            // Transformers.js v3 progress statuses: initiate | download | progress | done | ready
-            // (progress.progress is a 0..1 fraction)
-            const progressCallback = (progress) => {
-                if (progress.status === 'initiate') {
-                    Progress.update(0, `Fetching ${progress.file || 'model file'}...`);
-                } else if (progress.status === 'progress' && typeof progress.progress === 'number') {
-                    const pct = Math.min(100, Math.max(0, progress.progress * 100));
-                    Progress.update(pct, `Downloading ${modelId}: ${Math.round(pct)}%`);
-                } else if (progress.status === 'ready' || progress.status === 'loading') {
-                    Progress.update(100, 'Loading into memory...');
-                }
-            };
+            // Ask the browser to protect the OPFS download cache from eviction
+            // (must be requested from a user gesture — this is one).
+            if (navigator.storage && navigator.storage.persist) {
+                try { await navigator.storage.persist(); } catch { /* non-fatal */ }
+            }
+
+            // Initial line shows the customer-facing name and the expected
+            // total size; exact byte totals appear within seconds once the
+            // first files report their Content-Length.
+            const SIZE_HINTS = { 'tiny': '~65 MB', 'base': 'bundled',
+                'small': '~490 MB', 'large-v3-turbo': '~1.04 GB' };
+            Progress.showProgress('Downloading Model',
+                `${modelDisplayName(modelId)} — ${SIZE_HINTS[modelId] || 'size unknown'}`, () => {
+                // Throwing from the next progress event unwinds the stream
+                // reader inside transformers.js and closes the connection.
+                cancelled = true;
+            });
+            // Transformers.js v3 progress statuses: initiate | download | progress | done | ready.
+            const progressCallback = this.makeModelProgressCallback(modelId, () => cancelled);
 
             await this.loadWhisper(modelId, progressCallback);
 
@@ -928,7 +1133,16 @@ const App = {
         } catch (err) {
             Progress.hide();
             Status.clearActive();
-            Status.error(`Model load failed: ${err.message}`);
+            if (err && err.__cancelled) {
+                Status.warning(`Download of ${modelId} cancelled — progress saved, Download will resume from where it stopped`);
+            } else {
+                Status.error(`Model load failed: ${err.message}`);
+                // Bytes downloaded so far are spooled to disk by the resumable
+                // fetch layer, so a retry (or reopening the app) continues.
+                if (modelId !== 'base') {
+                    Status.warning('Partial download progress is saved — clicking Download again resumes from where it stopped');
+                }
+            }
             ModelStatus.clear();
             btn.disabled = false;
             btn.textContent = 'Download';
@@ -962,20 +1176,11 @@ const App = {
 
             if (loadedModelId !== modelId) {
                 const isBundled = modelId === 'base';
-                Progress.showProgress('Loading Model',
-                    isBundled ? 'Loading bundled base model...' : 'First run downloads from HuggingFace...');
-                // Transformers.js v3 emits: initiate | download | progress | done | ready
-                const progressCallback = (progress) => {
-                    if (cancelled) throw { __cancelled: true };
-                    if (progress.status === 'initiate') {
-                        Progress.update(10, `Fetching ${progress.file || 'model file'}...`);
-                    } else if (progress.status === 'progress' && typeof progress.progress === 'number') {
-                        const pct = Math.min(100, Math.max(0, progress.progress * 100));
-                        Progress.update(10 + pct * 0.4, `Downloading model: ${Math.round(pct)}%`);
-                    } else if (progress.status === 'ready' || progress.status === 'loading') {
-                        Progress.update(50, 'Loading model into memory...');
-                    }
-                };
+                Progress.showProgress(isBundled ? 'Loading Model' : 'Downloading Model',
+                    isBundled ? 'Loading bundled base model...' : 'First run downloads from HuggingFace...',
+                    () => { cancelled = true; });
+                // Accumulates bytes across all model files (base 10% → 50% span).
+                const progressCallback = this.makeModelProgressCallback(modelId, () => cancelled, 10, 40);
                 await this.loadWhisper(modelId, progressCallback);
                 if (cancelled) throw { __cancelled: true };
             }
