@@ -1,7 +1,7 @@
 import { FFmpegService } from './ffmpeg-service.js';
 import { whisperToTranscript } from './whisper-adapter.js';
 import { groupWords, findGroupAtTime, computeLayout, drawGroup, drawDiagnostics } from './caption-renderer.js';
-import { installResumableFetch } from './resumable-fetch.js';
+import { installResumableFetch, isFileCached } from './resumable-fetch.js';
 
 const waitForTransformers = () => new Promise((resolve) => {
     if (window.TransformersPipeline) {
@@ -316,6 +316,76 @@ function modelDisplayName(modelId) {
     return MODEL_DISPLAY_NAMES[modelId] || `Whisper ${modelId}`;
 }
 
+// ── Model availability (Download vs Load) ─────────────────────────
+// Where each model's files actually live on THIS machine:
+//   'bundled' — a complete copy under app/models/ (ships inside the zip)
+//   'cached'  — fully downloaded earlier and spooled to the OPFS cache by
+//               the resumable-fetch shim (.part + complete sidecar)
+//   null      — not on this machine; "Download" would fetch from the Hub
+// The model button shows "Load" whenever the value is non-null, so a
+// model that is already on disk never looks like it still needs a
+// download — and a bundled copy that went missing (e.g. a release built
+// without app/models/, or files evicted by the browser) honestly shows
+// "Download" instead of a "Load" that could only fail.
+const localAvailability = new Map();
+const availabilityInFlight = new Map();
+
+// Files a Whisper model must have present to run with zero network: the
+// ONNX weights for the dtypes loadWhisper() requests (kept in sync with
+// MODEL_FILE_SIZES) plus the smallest config/tokenizer set transformers.js
+// always loads before inference.
+const MODEL_SMALL_FILES = ['config.json', 'tokenizer.json'];
+
+function modelRequiredFiles(modelId) {
+    const onnx = Object.keys(App.MODEL_FILE_SIZES[modelId] || {});
+    if (!onnx.length) return null;
+    return [...MODEL_SMALL_FILES, ...onnx.map((f) => `onnx/${f}`)];
+}
+
+// Cheap probe — HEAD requests for the bundled candidates (never the
+// 600 MB bodies) plus OPFS sidecar reads for the download cache. Results
+// (and in-flight probes) are memoised; refresh=true re-checks after a
+// failed load or a finished download so the button only ever gets fresher.
+async function probeModelLocal(modelId, refresh = false) {
+    if (!refresh && localAvailability.has(modelId)) return localAvailability.get(modelId);
+    if (!refresh && availabilityInFlight.has(modelId)) return availabilityInFlight.get(modelId);
+    const run = (async () => {
+        let result = null;
+        const files = modelRequiredFiles(modelId);
+        if (files) {
+            const repo = `onnx-community/whisper-${modelId}_timestamped`;
+            try {
+                let bundled = true;
+                for (const f of files) {
+                    const url = new URL(`${env.localModelPath}${repo}/${f}`, document.baseURI).href;
+                    const res = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+                    if (!res.ok || res.headers.get('content-length') === '0') { bundled = false; break; }
+                }
+                if (bundled) result = 'bundled';
+            } catch { /* server refused / offline — treat as not bundled */ }
+            if (!result && navigator.storage && navigator.storage.getDirectory) {
+                let cached = true;
+                for (const f of files) {
+                    // Same URL shape transformers.js requests for this file
+                    // (remotePathTemplate '{model}/resolve/{revision}/',
+                    // default revision main) so the shim's cache key matches
+                    // what a real download wrote.
+                    const ok = await isFileCached(
+                        `https://huggingface.co/${repo}/resolve/main/${f}`);
+                    if (!ok) { cached = false; break; }
+                }
+                if (cached) result = 'cached';
+            }
+        }
+        localAvailability.set(modelId, result);
+        return result;
+    })();
+    availabilityInFlight.set(modelId, run);
+    const settle = () => availabilityInFlight.delete(modelId);
+    run.then(settle, settle);
+    return run;
+}
+
 const ModelStatus = {
     _el: null,
 
@@ -399,7 +469,21 @@ const App = {
         this.bindCenterResizer();
         this.updateModelStatus();
         this.updateThemeIcon();
+        // Probe where every model lives (bundled folder / download cache /
+        // missing) before the first auto-load, so selector flips show the
+        // right button instantly. Cheap: HEAD requests + OPFS sidecar reads.
+        await this.warmModelAvailability();
         this.autoLoadDefaultModel();
+    },
+
+    // Probe every selectable model, bundled candidates first, so their
+    // availability answers are cached by the time the user touches the
+    // selector. Failures are non-fatal (a probe failure just means
+    // "not on this machine").
+    async warmModelAvailability() {
+        for (const id of ['base', 'tiny', 'small', 'large-v3-turbo']) {
+            try { await probeModelLocal(id); } catch { /* treat as not local */ }
+        }
     },
 
     bindEvents() {
@@ -812,41 +896,77 @@ const App = {
             ModelStatus.set('cached', 'Loaded');
             btn.disabled = true;
             btn.textContent = 'Loaded';
+            btn.title = `${modelDisplayName(modelId)} is loaded and ready`;
             Pipeline.complete('model');
         } else {
-            ModelStatus.clear();
+            // The button doubles as Load: a model whose files are all on
+            // this machine (bundled folder or finished download) needs no
+            // download — it just loads into memory.
+            const local = localAvailability.get(modelId) || null;
             btn.disabled = false;
-            btn.textContent = 'Download';
+            if (local) {
+                btn.textContent = 'Load';
+                btn.title = `${modelDisplayName(modelId)} is already on this machine (`
+                    + `${local === 'bundled' ? 'bundled files' : 'previous download'}) — click to load it`;
+                ModelStatus.set('cached', local === 'bundled' ? 'Bundled' : 'Downloaded');
+            } else {
+                btn.textContent = 'Download';
+                btn.title = 'Download model for offline use';
+                ModelStatus.clear();
+            }
+            this._availShown = { model: modelId, value: local };
             Pipeline.undo('model');
         }
         // Show the toolbar Transcribe shortcut once a model is resident and
         // a video is loaded.
         transcribeBtn.hidden = loadedModelId === null;
         transcribeBtn.disabled = !this.videoFile;
-    },
 
-    // The base model ships inside the zip (app/models/) — load it silently in
-    // the background at startup so the first transcription needs no download.
-    async autoLoadDefaultModel() {
-        const modelId = 'base';
-        try {
-            Status.setActive('Loading bundled base model...');
-            await this.loadWhisper(modelId, null);
-            Status.clearActive();
-            Status.success('Bundled base model ready — no download needed');
-        } catch (err) {
-            Status.clearActive();
-            Status.warning(`Bundled model failed to load (${err.message}) — it will be loaded on first transcription`);
+        // Availability is answered asynchronously (HEAD + OPFS reads). Fire
+        // a probe only when this model's answer is still unknown; the
+        // re-render it triggers records the value in _availShown, so the
+        // render→probe→render cycle settles after one pass per model.
+        const shown = this._availShown;
+        if (loadedModelId !== modelId && (!shown || shown.model !== modelId)) {
+            probeModelLocal(modelId).then(() => {
+                if (loadedModelId !== modelId
+                        && document.getElementById('sel-model').value === modelId) {
+                    this.updateModelStatus();
+                }
+            });
         }
     },
 
-    // Shared Whisper loader used by Download button, auto-load, and Transcribe.
+    // The base model normally ships inside the zip (app/models/) — load it
+    // silently in the background at startup so the first transcription
+    // needs no download. If this install has no bundled copy (a release
+    // built without app/models/, or files evicted by the browser), say so
+    // and leave the button on "Download" — base can be fetched once and
+    // cached like any other model now, instead of failing forever with
+    // "local_files_only=true ... not found locally".
+    async autoLoadDefaultModel() {
+        const modelId = 'base';
+        const local = await probeModelLocal(modelId);
+        if (!local) {
+            Status.warning('Bundled base model files were not found in this install — press Download next to the model selector to fetch base once');
+            return;
+        }
+        try {
+            Status.setActive('Loading base model...');
+            await this.loadWhisper(modelId, null);
+            Status.clearActive();
+            Status.success('Base model ready — loaded from '
+                + (local === 'bundled' ? 'bundled files' : 'the local download cache')
+                + ', no download needed');
+        } catch (err) {
+            Status.clearActive();
+            Status.warning(`Base model failed to load (${err.message}) — it will be loaded on first transcription`);
+        }
+    },
+
+    // Shared Whisper loader used by the model button, auto-load, and Transcribe.
     async loadWhisper(modelId, progressCallback) {
         const modelName = `onnx-community/whisper-${modelId}_timestamped`;
-        // The base model is bundled under app/models/ — serve it from the
-        // local server instead of hitting HuggingFace (fast start, and works
-        // with no internet at all). Other models download and get cached.
-        env.allowRemoteModels = modelId !== 'base';
         // large-v3-turbo must use the quantized encoder: its fp32 encoder is
         // a 0.5 MB stub whose weights live in a separate 2.4 GB
         // encoder_model.onnx_data file that bypasses progress reporting (bar
@@ -857,7 +977,7 @@ const App = {
         const dtype = modelId === 'large-v3-turbo'
             ? 'q8'
             : { encoder_model: 'fp32', decoder_model_merged: 'q8' };
-        whisperPipeline = await pipeline(
+        const build = () => pipeline(
             'automatic-speech-recognition',
             modelName,
             {
@@ -865,7 +985,33 @@ const App = {
                 progress_callback: progressCallback || undefined
             }
         );
+        // A model whose files are ALL on this machine — the bundled folder
+        // or a finished resumable download — loads with
+        // allowRemoteModels = false: instant, and works with no internet
+        // at all. When the probe finds files missing, keep the Hub enabled
+        // so the click can actually fetch them (this is what used to break
+        // "base": a hardcoded local-only rule turned a missing bundled file
+        // into a Download button that could never succeed).
+        let local = await probeModelLocal(modelId);
+        env.allowRemoteModels = !local;
+        try {
+            whisperPipeline = await build();
+        } catch (err) {
+            // The probe said the files were here but the load still failed
+            // (the browser evicted part of the cache since the probe, for
+            // example). Fall back once to the Hub instead of dead-ending
+            // the user; missing files re-download through the resumable
+            // shim and complete the cache.
+            if (!local) throw err;
+            localAvailability.set(modelId, null);
+            env.allowRemoteModels = true;
+            whisperPipeline = await build();
+        }
         loadedModelId = modelId;
+        // Every file is on disk now — bundled or freshly downloaded and
+        // spooled by the shim. Remember it so the button offers "Load"
+        // again even after this model is swapped out and back.
+        localAvailability.set(modelId, local || 'cached');
         this.updateModelStatus();
     },
 
@@ -1077,14 +1223,22 @@ const App = {
         };
     },
 
-    // ── Download Model ──────────────────────────────────────
+    // ── Model Button (Download / Load) ──────────────────────
     async downloadModel() {
         const modelId = document.getElementById('sel-model').value;
         const modelName = `onnx-community/whisper-${modelId}_timestamped`;
         const btn = document.getElementById('btn-download-model');
 
+        // Re-check where the files live before deciding what this click
+        // means: a model fully present on this machine LOADS from disk
+        // with no network; anything else downloads from the Hub through
+        // the resumable shim. (The button label already reflects the last
+        // probe; this refresh catches files that arrived since — another
+        // tab, a finished partial, or a bundle copied in by hand.)
+        const local = await probeModelLocal(modelId, true);
+
         // large-v3-turbo is a ~1 GB download (quantized) — confirm before starting.
-        if (modelId === 'large-v3-turbo') {
+        if (!local && modelId === 'large-v3-turbo') {
             const ok = confirm(
                 'The "large" model (Whisper large-v3-turbo) is a ~1 GB download ' +
                 'that is cached on this machine. It gives the best transcription ' +
@@ -1100,10 +1254,12 @@ const App = {
 
         try {
             btn.disabled = true;
-            btn.textContent = 'Downloading...';
-            ModelStatus.set('downloading', 'Downloading');
+            btn.textContent = local ? 'Loading...' : 'Downloading...';
+            ModelStatus.set('downloading', local ? 'Loading' : 'Downloading');
             Pipeline.activate('model');
-            Status.setActive(`Downloading ${modelName}...`);
+            Status.setActive(local
+                ? `Loading ${modelDisplayName(modelId)}...`
+                : `Downloading ${modelName}...`);
 
             // Ask the browser to protect the OPFS download cache from eviction
             // (must be requested from a user gesture — this is one).
@@ -1114,10 +1270,15 @@ const App = {
             // Initial line shows the customer-facing name and the expected
             // total size; exact byte totals appear within seconds once the
             // first files report their Content-Length.
-            const SIZE_HINTS = { 'tiny': '~65 MB', 'base': 'bundled',
+            const SIZE_HINTS = { 'tiny': '~65 MB', 'base': '~136 MB',
                 'small': '~490 MB', 'large-v3-turbo': '~1.04 GB' };
-            Progress.showProgress('Downloading Model',
-                `${modelDisplayName(modelId)} — ${SIZE_HINTS[modelId] || 'size unknown'}`, () => {
+            Progress.showProgress(
+                local ? 'Loading Model' : 'Downloading Model',
+                local
+                    ? `${modelDisplayName(modelId)} — reading from `
+                        + `${local === 'bundled' ? 'bundled files' : 'the local download cache'}`
+                    : `${modelDisplayName(modelId)} — ${SIZE_HINTS[modelId] || 'size unknown'}`,
+                () => {
                 // Throwing from the next progress event unwinds the stream
                 // reader inside transformers.js and closes the connection.
                 cancelled = true;
@@ -1139,13 +1300,14 @@ const App = {
                 Status.error(`Model load failed: ${err.message}`);
                 // Bytes downloaded so far are spooled to disk by the resumable
                 // fetch layer, so a retry (or reopening the app) continues.
-                if (modelId !== 'base') {
+                if (!local) {
                     Status.warning('Partial download progress is saved — clicking Download again resumes from where it stopped');
                 }
             }
-            ModelStatus.clear();
-            btn.disabled = false;
-            btn.textContent = 'Download';
+            // Whatever the probe believed may be stale now — re-check so the
+            // button shows the truth (Download vs Load) on the next look.
+            await probeModelLocal(modelId, true);
+            this.updateModelStatus();
             Pipeline.deactivate('model');
         }
     },
@@ -1175,9 +1337,13 @@ const App = {
             const language = document.getElementById('sel-language').value;
 
             if (loadedModelId !== modelId) {
-                const isBundled = modelId === 'base';
-                Progress.showProgress(isBundled ? 'Loading Model' : 'Downloading Model',
-                    isBundled ? 'Loading bundled base model...' : 'First run downloads from HuggingFace...',
+                // Load-from-disk vs download, same rule as the model button.
+                const local = await probeModelLocal(modelId);
+                Progress.showProgress(local ? 'Loading Model' : 'Downloading Model',
+                    local
+                        ? `${modelDisplayName(modelId)} — reading from `
+                            + `${local === 'bundled' ? 'bundled files' : 'the local download cache'}...`
+                        : 'First run downloads from HuggingFace...',
                     () => { cancelled = true; });
                 // Accumulates bytes across all model files (base 10% → 50% span).
                 const progressCallback = this.makeModelProgressCallback(modelId, () => cancelled, 10, 40);

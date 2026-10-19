@@ -9,6 +9,7 @@
 //   T5  HTTP 404 passes through untouched (the local-cache probe path)
 //   T6  clean early end (fewer bytes than content-length) errors, partial kept
 //   T7  non-matching URLs bypass the wrapper entirely
+//   T8  isFileCached reports only COMPLETE, size-matching downloads
 import http from 'node:http';
 import fs from 'node:fs';
 import { Readable } from 'node:stream';
@@ -17,7 +18,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import assert from 'node:assert';
-import { makeResumableFetch } from '../app/assets/resumable-fetch.js';
+import { makeResumableFetch, isFileCached } from '../app/assets/resumable-fetch.js';
 
 // ── OPFS shim (subset of the FileSystemDirectoryHandle API) ──────────
 function makeDir(root) {
@@ -231,6 +232,42 @@ const rf = makeResumableFetch({
     catch (e) { threw = e; }
     assert.ok(threw, 'T7 raw fetch rejection passed through (bypassed wrapper)');
     console.log('T7 PASS — non-HF URL bypassed');
+}
+
+// T8 — isFileCached: true only for a complete sidecar + size-matching .part.
+// This is what flips the model button from Download to Load, so a partial
+// or corrupt spool must NEVER read as cached.
+{
+    const ANY = /.*/;
+    const url = 'https://huggingface.co/onnx-community/whisper-base_timestamped/resolve/main/onnx/encoder_model.onnx';
+    const key = shaKey(url);
+    const part = path.join(tmp, key + '.part');
+    const meta = path.join(tmp, key + '.meta');
+
+    assert.strictEqual(await isFileCached(url, async () => dir, ANY), false,
+        'T8 nothing spooled yet is not cached');
+
+    fs.writeFileSync(part, 'x'.repeat(1000));
+    fs.writeFileSync(meta, JSON.stringify({ size: 1000, total: 1000, complete: false }));
+    assert.strictEqual(await isFileCached(url, async () => dir, ANY), false,
+        'T8 partial download (complete:false) is not cached');
+
+    fs.writeFileSync(meta, JSON.stringify({ size: 4000, total: 4000, complete: true }));
+    assert.strictEqual(await isFileCached(url, async () => dir, ANY), false,
+        'T8 sidecar total disagreeing with .part size is not cached');
+
+    fs.writeFileSync(meta, JSON.stringify({ size: 1000, total: 1000, complete: true }));
+    assert.strictEqual(await isFileCached(url, async () => dir, ANY), true,
+        'T8 complete sidecar + matching .part is cached');
+
+    fs.rmSync(meta);
+    assert.strictEqual(await isFileCached(url, async () => dir, ANY), false,
+        'T8 missing sidecar is not cached');
+
+    // Default pattern: only HF resolve URLs are cacheable at all.
+    assert.strictEqual(await isFileCached('http://127.0.0.1:1/models/config.json'), false,
+        'T8 non-HF URL is never cached under the default pattern');
+    console.log('T8 PASS — isFileCached true only for complete downloads');
 }
 
 if (OPEN_HANDLES.size) { for (const stack of OPEN_HANDLES.values()) console.log('UNCLOSED handle:\n', stack); throw new Error(OPEN_HANDLES.size + ' file handles leaked'); }

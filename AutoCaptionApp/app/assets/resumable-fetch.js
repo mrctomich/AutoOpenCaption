@@ -39,6 +39,28 @@ function keyFor(url) {
     return 'hf-' + url.replace(/^https:\/\//, '').replace(/[^a-zA-Z0-9]+/g, '-').slice(-150);
 }
 
+// Public probe: has this URL's file already been fully downloaded through
+// the shim (complete .meta sidecar + .part whose size matches the recorded
+// total)? Lets the UI show "Load" instead of "Download" for models that are
+// already on this machine. Reads only sidecar files — no data is copied —
+// and returns false (never throws) for URLs this cache cannot hold.
+export async function isFileCached(url,
+    getDirectory = () => navigator.storage.getDirectory(),
+    urlPattern = HF_RESOLVE_RE) {
+    try {
+        if (!urlPattern.test(url)) return false;
+        const dir = await getDirectory();
+        const key = keyFor(url);
+        const fh = await dir.getFileHandle(key + '.meta');
+        const meta = JSON.parse(await (await fh.getFile()).text()) || {};
+        if (!meta.complete) return false;
+        const f = await (await dir.getFileHandle(key + '.part')).getFile();
+        return !meta.total || f.size === meta.total;
+    } catch {
+        return false; // absent, unreadable, or partial — not cached
+    }
+}
+
 export function makeResumableFetch({
     fetchImpl,                                  // underlying fetch (required)
     getDirectory,                               // () => Promise<FileSystemDirectoryHandle> (OPFS root)
