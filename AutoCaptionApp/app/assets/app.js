@@ -1,6 +1,7 @@
 import { FFmpegService } from './ffmpeg-service.js';
 import { whisperToTranscript } from './whisper-adapter.js';
 import { groupWords, findGroupAtTime, computeLayout, drawGroup, drawDiagnostics } from './caption-renderer.js';
+import { installResumableFetch } from './resumable-fetch.js';
 
 const waitForTransformers = () => new Promise((resolve) => {
     if (window.TransformersPipeline) {
@@ -42,6 +43,21 @@ env.backends.onnx.wasm.proxy = true;
 // Serve ONNX Runtime WASM from the local vendor folder instead of the jsdelivr
 // CDN, so transcription works in locked-down IT environments with no internet.
 env.backends.onnx.wasm.wasmPaths = new URL('assets/', document.baseURI).href;
+
+// HuggingFace's CDN drops long connections mid-file (net::ERR_CONNECTION_CLOSED
+// a few hundred MB into the large model's encoder), and transformers.js has no
+// resume: every dropout restarted the whole download and the tab eventually
+// died. installResumableFetch wraps fetch() for huggingface.co downloads,
+// spooling bytes to OPFS with automatic Range-retry resume (across drops AND
+// page reloads — clicking Download again picks up where it stopped). Because
+// the shim's OPFS files ARE the model cache, disable transformers.js's own
+// CacheStorage layer: leaving it on made a second ~1 GB copy in memory.
+if (navigator.storage && navigator.storage.getDirectory) {
+    env.useBrowserCache = false;
+    installResumableFetch({ log: (m) => console.info('[download]', m) });
+} else {
+    console.warn('OPFS unavailable in this browser — model downloads will not be resumable');
+}
 
 let whisperPipeline = null;
 let loadedModelId = null;
@@ -1071,8 +1087,10 @@ const App = {
         if (modelId === 'large-v3-turbo') {
             const ok = confirm(
                 'The "large" model (Whisper large-v3-turbo) is a ~1 GB download ' +
-                'that is cached in your browser. It gives the best transcription ' +
+                'that is cached on this machine. It gives the best transcription ' +
                 'accuracy but needs a strong machine and a strong connection.\n\n' +
+                'If the download is ever interrupted, just click Download again — ' +
+                'it resumes from where it stopped instead of starting over.\n\n' +
                 'Download now?'
             );
             if (!ok) return;
@@ -1086,6 +1104,12 @@ const App = {
             ModelStatus.set('downloading', 'Downloading');
             Pipeline.activate('model');
             Status.setActive(`Downloading ${modelName}...`);
+
+            // Ask the browser to protect the OPFS download cache from eviction
+            // (must be requested from a user gesture — this is one).
+            if (navigator.storage && navigator.storage.persist) {
+                try { await navigator.storage.persist(); } catch { /* non-fatal */ }
+            }
 
             // Initial line shows the customer-facing name and the expected
             // total size; exact byte totals appear within seconds once the
@@ -1110,9 +1134,14 @@ const App = {
             Progress.hide();
             Status.clearActive();
             if (err && err.__cancelled) {
-                Status.warning(`Download of ${modelId} cancelled`);
+                Status.warning(`Download of ${modelId} cancelled — progress saved, Download will resume from where it stopped`);
             } else {
                 Status.error(`Model load failed: ${err.message}`);
+                // Bytes downloaded so far are spooled to disk by the resumable
+                // fetch layer, so a retry (or reopening the app) continues.
+                if (modelId !== 'base') {
+                    Status.warning('Partial download progress is saved — clicking Download again resumes from where it stopped');
+                }
             }
             ModelStatus.clear();
             btn.disabled = false;
