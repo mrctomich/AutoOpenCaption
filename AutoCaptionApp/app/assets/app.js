@@ -1387,6 +1387,9 @@ const App = {
             active.remove();
             Status.clearActive();
             Status.success(`Transcription complete — ${transcript.words.length} words, ${((tEnd - tStart) / 1000).toFixed(1)}s`);
+            if (transcript.repairedTimestamps > 0) {
+                Status.warning(`${transcript.repairedTimestamps} word${transcript.repairedTimestamps === 1 ? '' : 's'} had collapsed timestamps (music/speech overlap) — timing interpolated automatically`);
+            }
 
             this.renderTranscriptEditor();
             this.renderTranscriptDisplay();
@@ -1436,7 +1439,7 @@ const App = {
         if (!this.captionGroups.length) return '';
         return this.captionGroups.map((group, i) => {
             const start = this.formatSRTTime(group.start);
-            const end = this.formatSRTTime(group.end);
+            const end = this.formatSRTTime(Math.max(group.end, group.start + 0.1));
             const text = group.words.map(w => w.text).join(' ');
             return `${i + 1}\n${start} --> ${end}\n${text}`;
         }).join('\n\n');
@@ -1446,7 +1449,7 @@ const App = {
         if (!this.captionGroups.length) return 'WEBVTT\n\n';
         const cues = this.captionGroups.map(group => {
             const start = this.formatVTTTime(group.start);
-            const end = this.formatVTTTime(group.end);
+            const end = this.formatVTTTime(Math.max(group.end, group.start + 0.1));
             const text = group.words.map(w => w.text).join(' ');
             return `${start} --> ${end}\n${text}`;
         }).join('\n\n');
