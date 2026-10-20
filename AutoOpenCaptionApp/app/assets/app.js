@@ -1406,7 +1406,10 @@ const App = {
             Status.clearActive();
             Status.success(`Transcription complete — ${transcript.words.length} words, ${((tEnd - tStart) / 1000).toFixed(1)}s`);
             if (transcript.repairedTimestamps > 0) {
-                Status.warning(`${transcript.repairedTimestamps} word${transcript.repairedTimestamps === 1 ? '' : 's'} had collapsed timestamps (music/speech overlap) — timing interpolated automatically`);
+                const t = transcript.timing;
+                let msg = `${transcript.repairedTimestamps} word${transcript.repairedTimestamps === 1 ? '' : 's'} (${t.runs} run${t.runs === 1 ? '' : 's'}) had missing or collapsed timestamps — timing estimated from surrounding speech`;
+                if (t.unplaced > 0) msg += `; ${t.unplaced} could not be placed reliably, word highlighting there is approximate`;
+                Status.warning(msg);
             }
 
             this.renderTranscriptEditor();
