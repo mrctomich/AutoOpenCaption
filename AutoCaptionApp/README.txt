@@ -37,6 +37,15 @@ automatically when the app opens — no download needed to transcribe with
 base. The "tiny", "small", and "large" models download from Hugging Face
 on first use and are cached in your browser afterward.
 
+Managing models: app/models/ holds one folder per model —
+whisper-tiny, whisper-base, whisper-small, whisper-large-v3-turbo — each
+self-contained (config, tokenizer, and ONNX weights). Delete a folder to
+free its disk space; the app shows "Download" for any model whose folder
+is missing. To add a model by hand, drop its complete file tree into the
+matching folder (the same files as the bundled whisper-base folder).
+Browser-downloaded models are cached inside the browser (see "clear the
+cache" below), separate from app/models/.
+
 Note: presets are stored in your browser. After updating AutoCaption,
 previously-saved presets from an older version persist; clear site data
 (see below) and restart to load the current factory presets.

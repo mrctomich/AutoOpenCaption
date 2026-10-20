@@ -36,8 +36,11 @@ const fetchFile = async (input) => {
 
 env.allowLocalModels = true;
 env.allowRemoteModels = true;
-// Bundled models ship in the zip under app/models/ (base model is included);
-// transformers.js looks here first and falls back to the Hub for tiny/small.
+// Bundled models ship in the zip under app/models/, one folder per model
+// (models/whisper-tiny, models/whisper-base, models/whisper-small,
+// models/whisper-large-v3-turbo — see bundledModelDir below). The base
+// model is included; transformers.js looks here first and falls back to
+// the Hub for the others.
 env.localModelPath = 'models/';
 env.backends.onnx.wasm.proxy = true;
 // Serve ONNX Runtime WASM from the local vendor folder instead of the jsdelivr
@@ -303,6 +306,17 @@ const Progress = {
     }
 };
 
+// ── Model naming (disk folders vs Hub repos) ─────────────────────────
+// Disk layout under app/models/ is FLAT, one self-contained folder per
+// model: models/whisper-tiny/, models/whisper-base/, models/whisper-small/,
+// models/whisper-large-v3-turbo/. Users can delete a folder to free space
+// or drop a model folder in by hand. transformers.js builds local paths as
+// env.localModelPath + <model name>, so loading from disk passes
+// bundledModelDir() as the pipeline model name; hubRepo() is the Hugging
+// Face repo id used whenever files must be fetched from the Hub.
+function bundledModelDir(modelId) { return `whisper-${modelId}`; }
+function hubRepo(modelId) { return `onnx-community/whisper-${modelId}_timestamped`; }
+
 // ── Model Status ────────────────────────────────────────────
 // Customer-facing model name shown in the download dialog (the HF repo id
 // "onnx-community/whisper-large-v3-turbo_timestamped" is not a name).
@@ -353,11 +367,12 @@ async function probeModelLocal(modelId, refresh = false) {
         let result = null;
         const files = modelRequiredFiles(modelId);
         if (files) {
-            const repo = `onnx-community/whisper-${modelId}_timestamped`;
+            const dir = bundledModelDir(modelId);
+            const repo = hubRepo(modelId);
             try {
                 let bundled = true;
                 for (const f of files) {
-                    const url = new URL(`${env.localModelPath}${repo}/${f}`, document.baseURI).href;
+                    const url = new URL(`${env.localModelPath}${dir}/${f}`, document.baseURI).href;
                     const res = await fetch(url, { method: 'HEAD', cache: 'no-store' });
                     if (!res.ok || res.headers.get('content-length') === '0') { bundled = false; break; }
                 }
@@ -966,7 +981,7 @@ const App = {
 
     // Shared Whisper loader used by the model button, auto-load, and Transcribe.
     async loadWhisper(modelId, progressCallback) {
-        const modelName = `onnx-community/whisper-${modelId}_timestamped`;
+        const repo = hubRepo(modelId);
         // large-v3-turbo must use the quantized encoder: its fp32 encoder is
         // a 0.5 MB stub whose weights live in a separate 2.4 GB
         // encoder_model.onnx_data file that bypasses progress reporting (bar
@@ -977,7 +992,10 @@ const App = {
         const dtype = modelId === 'large-v3-turbo'
             ? 'q8'
             : { encoder_model: 'fp32', decoder_model_merged: 'q8' };
-        const build = () => pipeline(
+        // build() takes the model identifier explicitly: the flat bundled
+        // folder name (models/whisper-<id>) when the files are on disk, the
+        // Hub repo id when they must be fetched.
+        const build = (modelName) => pipeline(
             'automatic-speech-recognition',
             modelName,
             {
@@ -995,7 +1013,7 @@ const App = {
         let local = await probeModelLocal(modelId);
         env.allowRemoteModels = !local;
         try {
-            whisperPipeline = await build();
+            whisperPipeline = await build(local ? bundledModelDir(modelId) : repo);
         } catch (err) {
             // The probe said the files were here but the load still failed
             // (the browser evicted part of the cache since the probe, for
@@ -1005,7 +1023,7 @@ const App = {
             if (!local) throw err;
             localAvailability.set(modelId, null);
             env.allowRemoteModels = true;
-            whisperPipeline = await build();
+            whisperPipeline = await build(repo);
         }
         loadedModelId = modelId;
         // Every file is on disk now — bundled or freshly downloaded and
@@ -1226,7 +1244,7 @@ const App = {
     // ── Model Button (Download / Load) ──────────────────────
     async downloadModel() {
         const modelId = document.getElementById('sel-model').value;
-        const modelName = `onnx-community/whisper-${modelId}_timestamped`;
+        const modelName = hubRepo(modelId);
         const btn = document.getElementById('btn-download-model');
 
         // Re-check where the files live before deciding what this click
@@ -1377,7 +1395,7 @@ const App = {
 
             this.transcript = transcript;
             this.transcriptMeta = {
-                model: `onnx-community/whisper-${modelId}_timestamped`,
+                model: hubRepo(modelId),
                 processingTime: tEnd - tStart,
                 audioSamples: audioSamples.length,
                 audioDuration: audioDuration
