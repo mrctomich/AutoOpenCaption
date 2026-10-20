@@ -139,6 +139,14 @@ header nav {
     line-height: 1;
     padding: 7px 12px;
     white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.btn-gear .gear-icon {
+    flex: 0 0 auto;
+    display: block;
 }
 
 /* Open-state affordance: the gear reads as a dropdown trigger. */
