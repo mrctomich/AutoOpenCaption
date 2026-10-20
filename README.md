@@ -1,10 +1,10 @@
 # AutoOpenCaption
-AutoCaption - Local Browser Captioning Tool
-==========================================
+
+Local Browser Captioning Tool
 
 Quick Start
 -----------
-1. Double-click "Start AutoCaption.bat"
+1. Double-click "Start AutoOpenCaption.bat"
 2. Your browser will open to http://localhost:8743
 3. Click "Import Video" or drag a video onto the preview area
 4. Click "Transcribe" to generate captions
@@ -28,7 +28,7 @@ Features
 
 How It Works
 ------------
-AutoCaption uses WebAssembly versions of FFmpeg and Whisper AI that run
+AutoOpenCaption uses WebAssembly versions of FFmpeg and Whisper AI that run
 entirely in your browser. No data is sent to any server.
 
 First-Time Use
@@ -47,7 +47,7 @@ matching folder (the same files as the bundled whisper-base folder).
 Browser-downloaded models are cached inside the browser (see "clear the
 cache" below), separate from app/models/.
 
-Note: presets are stored in your browser. After updating AutoCaption,
+Note: presets are stored in your browser. After updating AutoOpenCaption,
 previously-saved presets from an older version persist; clear site data
 (see below) and restart to load the current factory presets.
 
@@ -100,9 +100,9 @@ See LICENSES/ directory for full license texts.
 Troubleshooting
 ---------------
 Problem: "Could not start the server on port 8743"
-Solution: Another AutoCaption window (or program) is already using port 8743.
+Solution: Another AutoOpenCaption window (or program) is already using port 8743.
 Just open http://localhost:8743 in your browser, or close the other window
-and start again. Closing the AutoCaption console window stops its server.
+and start again. Closing the AutoOpenCaption console window stops its server.
 
 Problem: Video won't load
 Solution: Try a different video format (MP4 recommended)

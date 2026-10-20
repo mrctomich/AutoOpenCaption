@@ -1,7 +1,7 @@
-# AutoCaption2 — Handoff Document
+# AutoOpenCaption — Handoff Document
 
 ## Project Overview
-A local-only, zero-install browser-based video captioning tool. Users unzip a folder, double-click `Start AutoCaption.bat`, and a local PowerShell server runs at `http://localhost:8743`. Everything (transcription, editing, styling, preview, export) runs in-browser via WebAssembly (FFmpeg + Whisper via Transformers.js). No admin access, Python, Node, or FFmpeg required.
+A local-only, zero-install browser-based video captioning tool. Users unzip a folder, double-click `Start AutoOpenCaption.bat`, and a local PowerShell server runs at `http://localhost:8743`. Everything (transcription, editing, styling, preview, export) runs in-browser via WebAssembly (FFmpeg + Whisper via Transformers.js). No admin access, Python, Node, or FFmpeg required.
 
 **Core constraint:** Everything must live in a single folder that can be zipped, moved, and unzipped on any Windows machine with zero install. No internet required after first model download.
 
@@ -87,8 +87,8 @@ The vendored `app/wasm/ffmpeg-core.js` (UMD) does NOT have `export default` at t
 
 ## File Structure
 ```
-AutoCaptionApp/
-├── Start AutoCaption.bat
+AutoOpenCaptionApp/
+├── Start AutoOpenCaption.bat
 ├── server/
 │   └── serve.ps1
 ├── app/
@@ -128,7 +128,7 @@ AutoCaptionApp/
 - `app/ffmpeg/worker.js` — the worker that resolves paths
 - `app/assets/app.js` — main application (1245 lines)
 - `server/serve.ps1` — has COEP header issue (line 45)
-- `autocaption-web-execution-plan.md` — original design spec
+- `autoopencaption-web-execution-plan.md` — original design spec
 
 ## Verification Steps
 After fixing, verify:

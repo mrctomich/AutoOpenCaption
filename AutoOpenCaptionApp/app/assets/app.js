@@ -2208,7 +2208,7 @@ const App = {
     // ── Presets ─────────────────────────────────────────────
     async loadPresets() {
         return new Promise((resolve) => {
-            const request = indexedDB.open('AutoCaptionDB', 1);
+            const request = indexedDB.open('AutoOpenCaptionDB', 1);
             request.onupgradeneeded = (e) => {
                 const db = e.target.result;
                 if (!db.objectStoreNames.contains('presets')) {
