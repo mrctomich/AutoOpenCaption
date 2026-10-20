@@ -1416,7 +1416,10 @@ const App = {
             document.getElementById('btn-export-srt').disabled = false;
             document.getElementById('btn-export-vtt').disabled = false;
             document.getElementById('btn-generate').disabled = false;
-            document.getElementById('btn-render-settings').disabled = false;
+            // NOTE: btn-render-settings stays enabled at all times — render
+            // choices (fps, CRF, preset, audio) are meaningful before any
+            // video is loaded and the menu is the user's only say in how the
+            // video is encoded.
 
             Pipeline.complete('transcribe');
             Pipeline.complete('edit');
