@@ -1,4 +1,4 @@
-# Local Browser AutoCaption App — Execution Plan
+# Local Browser AutoOpenCaption App — Execution Plan
 
 **Target:** A single folder, zip-and-share, double-click-to-run captioning tool for Windows. No installers, no admin rights, no Python/Node/FFmpeg pre-installed on the user's machine. Everything — transcription, editing, styling, preview, and final MP4 export — runs locally in the user's existing browser.
 A single folder, zip-and-share, double-click-to-run captioning tool for Windows. No installers, no admin rights, no Python/Node/FFmpeg pre-installed on the user's machine. Everything — transcription, editing, styling, preview, and final MP4 export — runs locally in the user's existing browser. Provide customer with one zip file and it has everything in it that they need. Needs to work in IT environment where user has zero admin rights and limited download capabilities.
@@ -9,8 +9,8 @@ This document is the build spec. Follow it phase by phase; each phase has a conc
 ## 1. Architecture Summary
 
 ```
-AutoCaptionApp/                  <- the folder the user unzips
-├── Start AutoCaption.bat        <- double-click entry point
+AutoOpenCaptionApp/                  <- the folder the user unzips
+├── Start AutoOpenCaption.bat        <- double-click entry point
 ├── server/
 │   └── serve.ps1                <- zero-dependency local web server (PowerShell HttpListener)
 ├── app/                         <- static built frontend (HTML/CSS/JS, no build step needed at runtime)
@@ -21,7 +21,7 @@ AutoCaptionApp/                  <- the folder the user unzips
 └── README.txt
 ```
 
-**Why a local server instead of opening `index.html` directly:** Opening HTML straight from disk (`file://`) breaks WASM module loading in Chrome (CORS blocks `fetch()` of local files) and makes model caching unreliable across runs. Serving the same folder over `http://localhost` fixes both, and costs the user nothing — `Start AutoCaption.bat` launches a tiny server using PowerShell, which already ships on every Windows machine, then opens the default browser to `http://localhost:8743`. No binary to bundle, no install, no antivirus flags from an unsigned `.exe`.
+**Why a local server instead of opening `index.html` directly:** Opening HTML straight from disk (`file://`) breaks WASM module loading in Chrome (CORS blocks `fetch()` of local files) and makes model caching unreliable across runs. Serving the same folder over `http://localhost` fixes both, and costs the user nothing — `Start AutoOpenCaption.bat` launches a tiny server using PowerShell, which already ships on every Windows machine, then opens the default browser to `http://localhost:8743`. No binary to bundle, no install, no antivirus flags from an unsigned `.exe`.
 
 **Core libraries (vendored into `app/assets/`, not loaded from a CDN, so the app works offline after the first model download):**
 - **Transformers.js** (`@huggingface/transformers`) — runs Whisper in-browser via ONNX Runtime Web (WASM, with automatic WebGPU acceleration when available).
@@ -77,7 +77,7 @@ Presets are stored in IndexedDB (origin-stable now that we're on localhost) and 
 
 ### Phase 0 — Local server & app shell
 - Write `server/serve.ps1`: a PowerShell `System.Net.HttpListener` script that serves `app/` statically on `http://localhost:8743`, sets `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` (future-proofing for multi-thread ffmpeg.wasm), and correct MIME types for `.wasm`/`.js`.
-- Write `Start AutoCaption.bat`: launches `powershell -ExecutionPolicy Bypass -File server\serve.ps1`, waits ~1s, opens `http://localhost:8743` in the default browser. Include a visible console window so the user can see it's running (and close it to stop the app).
+- Write `Start AutoOpenCaption.bat`: launches `powershell -ExecutionPolicy Bypass -File server\serve.ps1`, waits ~1s, opens `http://localhost:8743` in the default browser. Include a visible console window so the user can see it's running (and close it to stop the app).
 - Build a minimal `index.html` shell with the four-panel layout from the reference screenshot: Preview, Caption Setup, Caption Style, Grouping/Effects/Position/Style Library.
 - **Done when:** double-clicking the `.bat` opens a browser tab serving the static shell, no console errors, closing the console window stops the server.
 

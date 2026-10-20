@@ -16,7 +16,7 @@ try {
 } catch [System.Net.HttpListenerException] {
     Write-Host ""
     Write-Host "ERROR: Could not start the server on port $Port." -ForegroundColor Red
-    Write-Host "If AutoCaption is already running in another window, just open" -ForegroundColor Yellow
+    Write-Host "If AutoOpenCaption is already running in another window, just open" -ForegroundColor Yellow
     Write-Host "http://localhost:$Port in your browser instead." -ForegroundColor Yellow
     Write-Host "Otherwise close the other program using port $Port and try again." -ForegroundColor Yellow
     Write-Host ""
@@ -24,7 +24,7 @@ try {
     exit 1
 }
 
-Write-Host "AutoCaption server running on http://localhost:$Port" -ForegroundColor Green
+Write-Host "AutoOpenCaption server running on http://localhost:$Port" -ForegroundColor Green
 Write-Host "Press Ctrl+C to stop." -ForegroundColor Yellow
 
 $mimeTypes = @{

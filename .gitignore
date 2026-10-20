@@ -2,7 +2,7 @@
 Videos/
 
 # Whisper model weights — downloaded at setup, too large for GitHub
-AutoCaptionApp/app/models/
+AutoOpenCaptionApp/app/models/
 
 # Manual backups of the app folder
 Archive/
