@@ -30,7 +30,9 @@ export function groupWords(words, grouping) {
             groups.push({
                 words: current,
                 start: groupStart,
-                end: current[current.length - 1].end
+                // Never emit a zero/negative-duration cue: it can never match
+                // a frame time, so the caption would be invisible.
+                end: Math.max(current[current.length - 1].end, groupStart + 0.1)
             });
             current = [word];
             groupStart = word.start;
@@ -43,8 +45,20 @@ export function groupWords(words, grouping) {
         groups.push({
             words: current,
             start: groupStart,
-            end: current[current.length - 1].end
+            end: Math.max(current[current.length - 1].end, groupStart + 0.1)
         });
+    }
+
+    // Adjacent cues must never overlap: the renderer matches times
+    // inclusively, so an overlapping group would either double-draw or hide
+    // the incoming caption for a frame (the +0.1 minimum can overshoot a
+    // next group that starts <100 ms later).
+    for (let i = 0; i < groups.length - 1; i++) {
+        const g = groups[i];
+        const next = groups[i + 1];
+        if (g.end > next.start && next.start > g.start) {
+            g.end = Math.max(g.start + 0.001, next.start - 0.01);
+        }
     }
 
     return groups;
