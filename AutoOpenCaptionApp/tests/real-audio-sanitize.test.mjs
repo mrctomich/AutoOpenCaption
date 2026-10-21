@@ -23,9 +23,9 @@ import { whisperToTranscript } from '../app/assets/whisper-adapter.js';
 
 const DURATION = 123.722; // exact WAV length (16 kHz mono PCM, header excluded)
 
-function loadRealChunks() {
+function loadRealChunks(name = './fixtures/john_whispercpp_raw.json') {
     const raw = JSON.parse(readFileSync(
-        new URL('./fixtures/john_whispercpp_raw.json', import.meta.url), 'utf8'));
+        new URL(name, import.meta.url), 'utf8'));
     return raw.transcription.map(seg => ({
         text: seg.text,
         timestamp: [seg.offsets.from / 1000, seg.offsets.to / 1000],
@@ -87,4 +87,42 @@ test('real whisper.cpp transcript repairs stay inside real neighbours', () => {
     const first = W[0];
     assert.equal(first.estimated, true);
     assert.equal(first.start, 0.05);
+});
+
+test('games clip: real-word collapses repaired inside neighbours', () => {
+    // 174.569 s clip; whisper.cpp returns 5 collapsed stamps here, all on
+    // real words ("where", "what", "and", "it", "do"), not punctuation.
+    const DUR = 174.569;
+    const chunks = loadRealChunks('./fixtures/games_whispercpp_raw.json');
+    const rawCollapsed = chunks
+        .flatMap(c => c.words).filter(w => w.timestamp[0] === w.timestamp[1]).length;
+    const t = whisperToTranscript({ chunks }, DUR, 'games.wav', 'en');
+    assert.equal(t.timing.repaired, rawCollapsed);
+    assert.equal(t.timing.repaired, 5);
+
+    const W = t.words.filter(w => !w.deleted);
+    const durCap = Math.floor(DUR * 100) / 100;
+    for (let k = 0; k < W.length; k++) {
+        const w = W[k];
+        assert.ok(w.end >= w.start, `word ${k} negative duration`);
+        if (k > 0) assert.ok(w.start >= W[k - 1].start, `word ${k} backward start`);
+        if (w.estimated) {
+            assert.ok(w.end <= durCap, `estimated word ${k} past audio end`);
+            assert.deepEqual([w.originalStart, w.originalEnd], [w.originalEnd, w.originalEnd],
+                `collapses must have start === end in raw stamps (word ${k})`);
+            if (k + 1 < W.length)
+                assert.ok(w.end <= W[k + 1].start + 1e-9,
+                    `estimated word ${k} "${w.text}" overruns next start`);
+            assert.equal(!!w.unplaced, w.end === w.start,
+                `word ${k} unplaced flag mismatch`);
+        }
+    }
+
+    // The reported failure coordinate 00:02:49.980: whisper.cpp's aligner is
+    // healthy here (the original collapse came from the transformers.js
+    // ONNX path) — the zone must pass through with no estimates.
+    const zone = W.filter(w => Math.abs(w.start - 169.98) <= 4);
+    assert.ok(zone.length >= 3, 'zone has words');
+    assert.equal(zone.some(w => w.estimated), false,
+        'healthy whisper.cpp zone must not be rewritten');
 });

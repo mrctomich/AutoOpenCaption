@@ -5,8 +5,8 @@ The original bug report pointed at collapsed word runs at **00:01:09.980**
 produced by the in-app transformers.js pipeline. Those coordinates come from
 the browser ONNX alignment; the headless test suite covers the repair
 machinery on real whisper.cpp data (`tests/real-audio-sanitize.test.mjs` +
-`tests/fixtures/john_whispercpp_raw.json`), but reproducing the exact zones
-requires the app itself:
+`tests/fixtures/john_whispercpp_raw.json` + `tests/fixtures/games_whispercpp_raw.json`),
+but reproducing the exact zones requires the app itself:
 
 1. Open AutoCaption (dev build), load `john.mp4` and the Games-popups video.
 2. Transcribe both with the current build (model cache may need a clear if
