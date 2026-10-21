@@ -731,6 +731,15 @@ main {
 .word-chip.playback-active .timestamp { color: var(--on-accent); opacity: 0.75; }
 .word-chip.deleted { opacity: 0.4; text-decoration: line-through; }
 
+/* Timestamp attention outlines in the Word Editor (colours follow the
+transcription Cancel button's red). needs-attention = estimated/missing
+timestamp the user hasn't touched yet; adjusted = text/start/end/split/
+merge changed from the original transcript. Listed after .selected so
+the status colour wins the border; selection still shows via the
+raised background. */
+.word-chip.needs-attention { border-color: var(--danger); }
+.word-chip.adjusted { border-color: var(--success); }
+
 .word-chip .word-text {
     min-width: 16px;
 }

@@ -1391,7 +1391,22 @@ const App = {
             Progress.update(90, 'Building transcript...');
             Status.setActive('Building transcript...');
 
-            const transcript = whisperToTranscript(result, audioDuration, this.videoFile.name, language);
+            // We requested return_timestamps:'word', so transformers.js
+            // emits one aligned word per flat chunk — tell the adapter not
+            // to treat those as segments needing estimated word pacing.
+            const transcript = whisperToTranscript(result, audioDuration, this.videoFile.name, language,
+                { wordLevelTimestamps: true });
+
+            // Snapshot the model's original values per word so the Word
+            // Editor can tell which chips the user has touched since
+            // transcription (green outline) vs still-estimated timing
+            // (red outline). Undo/redo serialises the transcript, so the
+            // snapshot travels with it and undo restores the red flag.
+            for (const w of transcript.words) {
+                w.origText = w.text;
+                w.origStart = w.start;
+                w.origEnd = w.end;
+            }
 
             this.transcript = transcript;
             this.transcriptMeta = {
@@ -1814,6 +1829,19 @@ const App = {
     },
 
     // ── Transcript Editor ───────────────────────────────────
+    // A word counts as "addressed" (green outline) once the user has
+    // changed its text, start or end away from the values the transcript
+    // was created with, or explicitly split/merged it (userAdjusted flag).
+    // Transcripts created before the orig snapshot existed fall back to
+    // the current values, so nothing starts out green by accident.
+    isWordAdjusted(word) {
+        if (word.userAdjusted) return true;
+        if (word.origText !== undefined && word.text !== word.origText) return true;
+        if (word.origStart !== undefined && word.start !== word.origStart) return true;
+        if (word.origEnd !== undefined && word.end !== word.origEnd) return true;
+        return false;
+    },
+
     renderTranscriptEditor() {
             const editor = document.getElementById('word-selector');
         if (!this.transcript || !this.transcript.words.length) {
@@ -1825,7 +1853,19 @@ const App = {
         this._lastActiveWordId = null;
         this.transcript.words.forEach((word, i) => {
             const chip = document.createElement('span');
-            chip.className = `word-chip ${word.deleted ? 'deleted' : ''} ${i === this.selectedWordIndex ? 'selected' : ''}`;
+            // Status outlines: green once the user has addressed the word,
+            // red (same language as the transcription Cancel button) while
+            // its timestamp is still estimated/missing and untouched.
+            const adjusted = this.isWordAdjusted(word);
+            const needsAttention = !!word.estimated && !adjusted;
+            chip.className = `word-chip ${word.deleted ? 'deleted' : ''} ${i === this.selectedWordIndex ? 'selected' : ''}`
+                + (adjusted ? ' adjusted' : needsAttention ? ' needs-attention' : '');
+            if (needsAttention) {
+                chip.title = 'Missing or collapsed timestamp — timing is estimated. '
+                    + 'Adjust the text, start, end, split or merge this word to mark it handled.';
+            } else if (adjusted) {
+                chip.title = 'Adjusted from the original transcript';
+            }
             chip.dataset.index = i;
 
             const textSpan = document.createElement('span');
@@ -2116,12 +2156,18 @@ const App = {
         const mid = Math.floor(word.text.length / 2);
         const splitPoint = word.start + (word.end - word.start) * (mid / word.text.length);
 
+        // Spread the original word so estimated/orig* metadata survives the
+        // split; both halves count as addressed (userAdjusted → green).
         this.transcript.words.splice(index, 1, {
+            ...word,
             id: word.id, text: word.text.slice(0, mid),
-            start: word.start, end: splitPoint, deleted: false
+            start: word.start, end: splitPoint, deleted: false,
+            userAdjusted: true
         }, {
+            ...word,
             id: `w${String(Date.now()).slice(-6)}`, text: word.text.slice(mid),
-            start: splitPoint, end: word.end, deleted: false
+            start: splitPoint, end: word.end, deleted: false,
+            userAdjusted: true
         });
 
         this.selectedWordIndex = index;
@@ -2138,6 +2184,9 @@ const App = {
         const next = this.transcript.words[index + 1];
         current.text = current.text + ' ' + next.text;
         current.end = next.end;
+        // Merging is deliberate attention — the chip turns green even if
+        // the merged word keeps an estimated timestamp.
+        current.userAdjusted = true;
         this.transcript.words.splice(index + 1, 1);
         this.rebuildLayout();
         this.renderTranscriptEditor();
@@ -2452,3 +2501,5 @@ const App = {
 };
 
 document.addEventListener('DOMContentLoaded', () => App.init());
+// Expose for debugging and automated UI checks from the console/CDP.
+window.App = App;

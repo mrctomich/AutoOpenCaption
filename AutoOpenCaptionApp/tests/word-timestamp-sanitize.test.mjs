@@ -445,4 +445,49 @@ function assertValid(words, label) {
     console.log('T14 estimate diagnostics + transcript timing summary: PASS');
 }
 
+// T15: stalled collapsed stamps — the real transformers.js word-level shape
+// from Videos/JohnOliverFakeChurchStunt.mp4 (~01:52): every word actually
+// spoken across 100.9→116.32 comes back collapsed AT 116.32, exactly the
+// next healthy word's start. Anchoring the run there leaves zero room and
+// the words become zero-length `unplaced` — they never fire at all. The
+// sanitizer must fall back to spreading from the previous valid word's end.
+{
+    const words = [
+        W('ok', 99.4, 100.9),
+        W('close', 116.32, 116.32),
+        W('the', 116.32, 116.32),
+        W('church.', 116.32, 116.32),
+        W('The', 116.32, 116.32),
+        W('end', 116.32, 117.0),
+    ];
+    const { words: out, repaired } = sanitizeWords(words, 123.7);
+    assert.strictEqual(repaired, 4, 'T15: run not repaired');
+    assert.ok(out.every((w) => w.unplaced !== true),
+        'T15: stalled anchor must fall back to spreading, not unplace');
+    for (let k = 1; k <= 4; k++) {
+        assert.ok(out[k].end > out[k].start, `T15: word ${k} zero-length — would never fire`);
+        assert.ok(out[k].start >= 100.9 - 1e-9 && out[k].end <= 116.32 + 1e-9,
+            `T15: word ${k} outside [prevEnd, nextStart]`);
+        assert.strictEqual(out[k].estimated, true, 'T15: repaired word must stay flagged');
+        assert.strictEqual(out[k].estimatedReason, 'collapsed', 'T15: reason lost');
+    }
+    console.log('T15 stalled collapsed run falls back to prevEnd spread: PASS');
+}
+
+// T16: an anchor with a FEASIBLE window is still honoured (PR #10 behaviour
+// unchanged — anchoring is only abandoned when it leaves no firing room).
+{
+    const words = [
+        W('ok', 0, 10),
+        W('a', 12, 12),
+        W('b', 12, 12),
+        W('next', 20, 21),
+    ];
+    const { words: out } = sanitizeWords(words, 30);
+    assert.ok(Math.abs(out[1].start - 12) < 1e-9, 'T16: feasible anchor must be kept');
+    assert.ok(out[1].start > 10, 'T16: run slid back to prevEnd');
+    assert.ok(out.every((w) => w.unplaced !== true));
+    console.log('T16 feasible anchor still honoured: PASS');
+}
+
 console.log('\nAll word-timestamp sanitize tests PASSED');

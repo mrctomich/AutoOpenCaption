@@ -6,6 +6,9 @@
  * Whisper ONNX exports:
  *
  *   Schema A (word-level):  chunks[].words[].{ word, timestamp }
+ *   Schema A2 (transformers.js return_timestamps:'word'): every WORD is its
+ *     own flat chunk chunks[].{ text, timestamp } — real alignment, NOT a
+ *     segment to estimate over. Opt in with options.wordLevelTimestamps.
  *   Schema B (segment-level): chunks[].{ text, timestamp }
  *   Schema C (no chunks):   { text } only
  *
@@ -147,6 +150,7 @@ export function sanitizeWords(words, audioDuration = null) {
         const runLen = j - i;
 
         let lo = i > 0 ? items[i - 1].e : 0;
+        const prevEnd = lo;
         // The collapsed stamps themselves are unreliable for duration but they
         // weakly locate the run: when finite and after the previous word, keep
         // the run at its collapsed position instead of sliding it backwards.
@@ -158,7 +162,11 @@ export function sanitizeWords(words, audioDuration = null) {
             const a = Number(items[k].w.start);
             if (a < anchorMin) anchorMin = a;
         }
-        if (Number.isFinite(anchorMin) && anchorMin > lo) lo = anchorMin;
+        let anchorApplied = false;
+        if (Number.isFinite(anchorMin) && anchorMin > lo) {
+            lo = anchorMin;
+            anchorApplied = true;
+        }
 
         // Hard upper bound — the run can never overrun the next valid word or
         // the end of the audio. Kept as EXACT seconds, never rounded: a bound
@@ -167,6 +175,17 @@ export function sanitizeWords(words, audioDuration = null) {
         if (j < items.length) hi = items[j].s;
         if (durSec !== null) hi = (hi === undefined ? durSec : Math.min(hi, durSec));
         if (hi === undefined || !Number.isFinite(hi)) hi = lo + runLen * FALLBACK_WORD_DURATION;
+        // A collapsed stamp often STALLS at the end of the gap it covers:
+        // transformers.js word-level stamps pile up exactly at the next
+        // healthy word's start. If anchoring at that stamp leaves the run no
+        // room to breathe (< 1cs per word), fall back to spreading from the
+        // end of the previous valid word — the pre-anchor behaviour, which
+        // always gives the run a firing window instead of zero-length words
+        // that never highlight at all.
+        if (anchorApplied && (hi - lo) * 100 < runLen - 1e-9
+            && prevEnd < lo && (hi - prevEnd) * 100 >= runLen - 1e-9) {
+            lo = prevEnd;
+        }
         if (hi < lo) {
             // Healthy neighbours themselves overlap (previous end is past the
             // next word's start) or the anchor sits beyond the audio end.
@@ -236,7 +255,7 @@ export function sanitizeWords(words, audioDuration = null) {
     };
 }
 
-export function whisperToTranscript(result, audioDuration, sourceFile, language) {
+export function whisperToTranscript(result, audioDuration, sourceFile, language, options = {}) {
     _nextId = 0;
 
     const words = [];
@@ -256,12 +275,29 @@ export function whisperToTranscript(result, audioDuration, sourceFile, language)
                     });
                 });
             } else if (chunk.text && chunk.timestamp) {
-                const chunkWords = splitSegmentToWords(
-                    chunk.text,
-                    chunk.timestamp[0],
-                    chunk.timestamp[1]
-                );
-                words.push(...chunkWords);
+                // transformers.js with return_timestamps:'word' emits ONE
+                // aligned word per chunk: chunks[].{ text, timestamp } with
+                // no words array. Those stamps are real model alignments —
+                // running them through splitSegmentToWords() would mark
+                // EVERY word 'segment-split'/estimated (the "all chips red"
+                // regression). Only a chunk holding several whitespace
+                // tokens is genuinely a segment to pace words over.
+                const tokens = String(chunk.text).trim().split(/\s+/).filter(Boolean);
+                if (options.wordLevelTimestamps && tokens.length === 1) {
+                    words.push({
+                        id: makeId(),
+                        text: tokens[0],
+                        start: toStamp(chunk.timestamp[0]),
+                        end: toStamp(chunk.timestamp[1]),
+                        deleted: false
+                    });
+                } else {
+                    words.push(...splitSegmentToWords(
+                        chunk.text,
+                        chunk.timestamp[0],
+                        chunk.timestamp[1]
+                    ));
+                }
             }
         });
     } else if (result.text) {
