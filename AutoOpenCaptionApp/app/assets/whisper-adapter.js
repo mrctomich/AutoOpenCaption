@@ -6,6 +6,9 @@
  * Whisper ONNX exports:
  *
  *   Schema A (word-level):  chunks[].words[].{ word, timestamp }
+ *   Schema A2 (transformers.js return_timestamps:'word'): every WORD is its
+ *     own flat chunk chunks[].{ text, timestamp } — real alignment, NOT a
+ *     segment to estimate over. Opt in with options.wordLevelTimestamps.
  *   Schema B (segment-level): chunks[].{ text, timestamp }
  *   Schema C (no chunks):   { text } only
  *
@@ -236,7 +239,7 @@ export function sanitizeWords(words, audioDuration = null) {
     };
 }
 
-export function whisperToTranscript(result, audioDuration, sourceFile, language) {
+export function whisperToTranscript(result, audioDuration, sourceFile, language, options = {}) {
     _nextId = 0;
 
     const words = [];
@@ -256,12 +259,29 @@ export function whisperToTranscript(result, audioDuration, sourceFile, language)
                     });
                 });
             } else if (chunk.text && chunk.timestamp) {
-                const chunkWords = splitSegmentToWords(
-                    chunk.text,
-                    chunk.timestamp[0],
-                    chunk.timestamp[1]
-                );
-                words.push(...chunkWords);
+                // transformers.js with return_timestamps:'word' emits ONE
+                // aligned word per chunk: chunks[].{ text, timestamp } with
+                // no words array. Those stamps are real model alignments —
+                // running them through splitSegmentToWords() would mark
+                // EVERY word 'segment-split'/estimated (the "all chips red"
+                // regression). Only a chunk holding several whitespace
+                // tokens is genuinely a segment to pace words over.
+                const tokens = String(chunk.text).trim().split(/\s+/).filter(Boolean);
+                if (options.wordLevelTimestamps && tokens.length === 1) {
+                    words.push({
+                        id: makeId(),
+                        text: tokens[0],
+                        start: toStamp(chunk.timestamp[0]),
+                        end: toStamp(chunk.timestamp[1]),
+                        deleted: false
+                    });
+                } else {
+                    words.push(...splitSegmentToWords(
+                        chunk.text,
+                        chunk.timestamp[0],
+                        chunk.timestamp[1]
+                    ));
+                }
             }
         });
     } else if (result.text) {

@@ -1391,7 +1391,11 @@ const App = {
             Progress.update(90, 'Building transcript...');
             Status.setActive('Building transcript...');
 
-            const transcript = whisperToTranscript(result, audioDuration, this.videoFile.name, language);
+            // We requested return_timestamps:'word', so transformers.js
+            // emits one aligned word per flat chunk — tell the adapter not
+            // to treat those as segments needing estimated word pacing.
+            const transcript = whisperToTranscript(result, audioDuration, this.videoFile.name, language,
+                { wordLevelTimestamps: true });
 
             // Snapshot the model's original values per word so the Word
             // Editor can tell which chips the user has touched since
