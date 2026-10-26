@@ -448,6 +448,38 @@ main {
     margin-top: var(--space-2);
 }
 
+/* ── Word Editor header (title + experimental CTC realign actions) ── */
+.word-editor-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+}
+.word-editor-header h2 { margin-bottom: var(--space-1); }
+.word-editor-header-actions { display: flex; gap: var(--space-1); }
+.btn-ctc {
+    padding: 2px 8px;
+    font-size: var(--text-size-xs);
+    white-space: nowrap;
+}
+.btn-ctc:disabled { opacity: 0.55; cursor: default; }
+.exp-badge {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    padding: 0 3px;
+    margin-left: 2px;
+    vertical-align: 1px;
+}
+.inspector-align-note {
+    font-size: var(--text-size-xs);
+    color: var(--text-secondary);
+    padding: 0 2px 2px;
+}
+
 /* ── Transcript Toolbar (left column, above video) ────── */
 .transcript-toolbar {
     display: flex;
@@ -739,6 +771,9 @@ the status colour wins the border; selection still shows via the
 raised background. */
 .word-chip.needs-attention { border-color: var(--danger); }
 .word-chip.adjusted { border-color: var(--success); }
+/* Experimental CTC realign marker (Phase 4). After the two status colours so
+   a machine-aligned chip reads accent; user text edits keep their own flag. */
+.word-chip.ctc-aligned { border-color: var(--accent); }
 
 .word-chip .word-text {
     min-width: 16px;
