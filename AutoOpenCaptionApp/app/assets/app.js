@@ -1642,6 +1642,11 @@ const App = {
         } finally {
             this._transcribeRunning = false;
             this._transcribeCancel = null;
+            // updateCtcUi ran above while _transcribeRunning was still true,
+            // which kept Realign/Revert hidden after a successful pass.
+            // Re-evaluate now that the flag is clear (also correct on cancel:
+            // an existing transcript becomes actionable again).
+            this.updateCtcUi();
         }
     },
 

@@ -463,6 +463,9 @@ main {
     white-space: nowrap;
 }
 .btn-ctc:disabled { opacity: 0.55; cursor: default; }
+/* The app has no generic .hidden rule (all others are scoped) — without
+   this, updateCtcUi's classList.toggle('hidden') kept the buttons visible. */
+.btn-ctc.hidden { display: none; }
 .exp-badge {
     font-size: 9px;
     text-transform: uppercase;
