@@ -330,7 +330,9 @@ export async function loadCtcAligner(options = {}) {
 // A token whose frames average less probability than this had no real acoustic evidence.
 // Uniform (zero-information) emissions over the 32-class vocab give p = 1/32 ≈ 0.031, so
 // 0.05 flags "the model is not telling us anything about this word" without punishing
-// merely-difficult frames. Overridable per call; Phase 5 will tune it on real fixtures.
+// merely-difficult frames. Overridable per call. NOT calibrated against real audio
+// fixtures (prototype Phase 5 never ran) — it fails safe: words below the gate keep
+// their existing Whisper timing. Do not tune without evidence.
 export const CTC_MIN_TOKEN_LOGPROB = Math.log(0.05); // ≈ -3.0 nats
 
 // Safety cap on the backpointer table (T * (2S+1) Int8 entries). Chunk planning keeps

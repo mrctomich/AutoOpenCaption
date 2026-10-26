@@ -3,7 +3,7 @@ import { whisperToTranscript } from './whisper-adapter.js';
 import { groupWords, findGroupAtTime, computeLayout, drawGroup, drawDiagnostics } from './caption-renderer.js';
 import { installResumableFetch, isFileCached } from './resumable-fetch.js';
 import { loadCtcAligner, alignCtcTranscript, CtcAlignerError, CTC_MODEL_ID } from './ctc-aligner.js';
-import { applyCtcResult, revertCtcResult } from './ctc-apply.js';
+import { applyCtcResult, revertCtcResult, canCtcRealign } from './ctc-apply.js';
 
 const waitForTransformers = () => new Promise((resolve) => {
     if (window.TransformersPipeline) {
@@ -1095,10 +1095,17 @@ const App = {
         if (!realign || !revert) return;
         const hasTranscript = !!(this.transcript && this.transcript.words.length);
         const show = hasTranscript && !this._transcribeRunning;
+        // Gap B: the CTC aligner model is English-only. Non-English (or
+        // unknown/'auto') transcripts keep the button visible but disabled,
+        // with a tooltip that says why.
+        const supported = canCtcRealign(this.transcript);
         realign.classList.toggle('hidden', !show);
         revert.classList.toggle('hidden', !show || !this._ctcSnapshot);
-        realign.disabled = !!this._ctcRunning;
+        realign.disabled = !!this._ctcRunning || !supported;
         revert.disabled = !!this._ctcRunning;
+        realign.title = supported
+            ? 'Experimental: re-derive word timestamps from the audio with a CTC forced aligner'
+            : 'Experimental CTC realignment supports English only — transcribe with language "English" to enable it';
     },
 
     async realignWordTiming() {
@@ -1110,6 +1117,13 @@ const App = {
             return;
         }
         const transcript = this.transcript;
+
+        // Gap B gate (belt-and-braces with updateCtcUi): the wav2vec2
+        // aligner is English-only; never let another language in.
+        if (!canCtcRealign(transcript)) {
+            Status.warning('CTC realignment supports English only — transcribe with language "English" first.');
+            return;
+        }
 
         // One-time ~91 MB model download (then cached in the Cache API).
         // Ask before spending the bandwidth unless it is already cached.
@@ -1173,16 +1187,24 @@ const App = {
             }
 
             this.saveState();
-            const applied = applyCtcResult(transcript.words, result);
+            const applied = applyCtcResult(transcript.words, result, {
+                skipUserAdjusted: true,
+                duration: audio.samples.length / 16000,
+            });
             this._ctcSnapshot = applied.snapshot;
             this.rebuildLayout();
             this.renderTranscriptEditor();
             this.renderTranscriptDisplay();
             this.updateInspector();
             this.updatePreview();
-            const skipped = applied.kept;
-            Status.success(`Realigned ${applied.aligned} of ${applied.aligned + skipped} word timings (experimental)`
-                + (skipped ? ` — ${skipped} kept their timing (no CTC evidence)` : ''));
+            const skipped = applied.kept - applied.skippedUserAdjusted;
+            let msg = `Realigned ${applied.aligned} of ${applied.aligned + applied.kept} word timings (experimental)`;
+            if (skipped) msg += ` — ${skipped} kept their timing (no CTC evidence)`;
+            if (applied.skippedUserAdjusted) msg += `, ${applied.skippedUserAdjusted} kept your manual timing`;
+            Status.success(msg);
+            if (applied.flaggedInvalid) {
+                Status.warning(`${applied.flaggedInvalid} manually adjusted word ${applied.flaggedInvalid === 1 ? 'timing looks' : 'timings look'} invalid (negative, reversed, or beyond the audio) — kept unchanged, please fix them in the inspector.`);
+            }
         } catch (err) {
             Progress.hide();
             if (err instanceof CtcAlignerError && err.code === 'cancelled') {
