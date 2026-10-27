@@ -69,6 +69,19 @@ WebAssembly; a 3-minute 1080p clip can take 15-30+ minutes depending on
 your CPU. The progress bar shows real encoding progress and the encode
 can be cancelled mid-run.
 
+Experimental: Realign Word Timing
+---------------------------------
+The Word Editor has an experimental "Realign timing" button that
+re-derives word timestamps directly from the audio using a CTC forced
+aligner (wav2vec2-base-960h). The first click downloads a one-time
+~91 MB aligner model, cached in your browser like the Whisper models.
+English transcripts only — the button stays disabled for other
+languages. Words you adjusted manually keep YOUR timings, words the
+aligner is not confident about keep their Whisper timings, and
+"Revert timing" restores the whole pre-realign state. Note: running
+the aligner alongside a loaded Whisper model increases peak browser
+memory; the confidence threshold is not yet calibrated on real audio.
+
 Style Presets
 -------------
 Presets are saved in your browser's IndexedDB storage. To transfer

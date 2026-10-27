@@ -2,6 +2,8 @@ import { FFmpegService } from './ffmpeg-service.js';
 import { whisperToTranscript } from './whisper-adapter.js';
 import { groupWords, findGroupAtTime, computeLayout, drawGroup, drawDiagnostics } from './caption-renderer.js';
 import { installResumableFetch, isFileCached } from './resumable-fetch.js';
+import { loadCtcAligner, alignCtcTranscript, CtcAlignerError, CTC_MODEL_ID } from './ctc-aligner.js';
+import { applyCtcResult, revertCtcResult, canCtcRealign } from './ctc-apply.js';
 
 const waitForTransformers = () => new Promise((resolve) => {
     if (window.TransformersPipeline) {
@@ -64,6 +66,30 @@ if (navigator.storage && navigator.storage.getDirectory) {
 
 let whisperPipeline = null;
 let loadedModelId = null;
+
+// ── Experimental CTC realign (Phase 4) ─────────────────────────────
+// One shared wav2vec2 forced-aligner instance, loaded lazily on first use.
+// The decoded 16 kHz audio of the current transcript is cached on
+// App._audioCache so realign never re-runs FFmpeg.
+let ctcAlignerPromise = null;
+const CTC_MODEL_FILES = [
+    'config.json',
+    'tokenizer.json',
+    'tokenizer_config.json',
+    'preprocessor_config.json',
+    'onnx/model_quantized.onnx',
+];
+async function isCtcModelCached() {
+    if (!navigator.storage || !navigator.storage.getDirectory) return false;
+    for (const f of CTC_MODEL_FILES) {
+        // Same URL shape transformers.js requests (remotePathTemplate
+        // '{model}/resolve/{revision}/', revision main) so the resumable-
+        // fetch shim's cache key matches what a real download wrote.
+        const ok = await isFileCached(`https://huggingface.co/${CTC_MODEL_ID}/resolve/main/${f}`);
+        if (!ok) return false;
+    }
+    return true;
+}
 
 // ── Status Manager ──────────────────────────────────────────
 const Status = {
@@ -505,6 +531,8 @@ const App = {
         document.getElementById('btn-import').addEventListener('click', () => this.importVideo());
         document.getElementById('btn-transcribe').addEventListener('click', () => this.transcribe());
         document.getElementById('btn-transcribe-model').addEventListener('click', () => this.transcribe());
+        document.getElementById('btn-ctc-realign').addEventListener('click', () => this.realignWordTiming());
+        document.getElementById('btn-ctc-revert').addEventListener('click', () => this.revertCtcTiming());
         document.getElementById('btn-play').addEventListener('click', () => this.togglePlay());
         document.getElementById('scrubber').addEventListener('input', (e) => this.scrub(e));
         document.getElementById('btn-export-srt').addEventListener('click', () => this.exportSRT());
@@ -748,6 +776,11 @@ const App = {
         const url = URL.createObjectURL(file);
         this.video.src = url;
         this.videoFile = file;
+        // New video ⇒ the previous transcript's cached audio and any
+        // pending realign snapshot are stale.
+        this._audioCache = null;
+        this._ctcSnapshot = null;
+        this.updateCtcUi();
         document.getElementById('drop-zone').classList.add('hidden');
     },
 
@@ -1050,6 +1083,156 @@ const App = {
     },
 
     // ── Extract Audio ───────────────────────────────────────
+    // ── Experimental CTC word-timing realign (Phase 4) ──────────────
+    // Re-derives word timestamps from the already-decoded audio with the
+    // wav2vec2 forced aligner (ctc-aligner.js). Non-destructive: only words
+    // the aligner found audio evidence for are changed, everything else
+    // keeps its current timing, and "Revert timing" restores the whole
+    // pre-realign state. Apply/revert rules live in ctc-apply.js.
+    updateCtcUi() {
+        const realign = document.getElementById('btn-ctc-realign');
+        const revert = document.getElementById('btn-ctc-revert');
+        if (!realign || !revert) return;
+        const hasTranscript = !!(this.transcript && this.transcript.words.length);
+        const show = hasTranscript && !this._transcribeRunning;
+        // Gap B: the CTC aligner model is English-only. Non-English (or
+        // unknown/'auto') transcripts keep the button visible but disabled,
+        // with a tooltip that says why.
+        const supported = canCtcRealign(this.transcript);
+        realign.classList.toggle('hidden', !show);
+        revert.classList.toggle('hidden', !show || !this._ctcSnapshot);
+        realign.disabled = !!this._ctcRunning || !supported;
+        revert.disabled = !!this._ctcRunning;
+        realign.title = supported
+            ? 'Experimental: re-derive word timestamps from the audio with a CTC forced aligner'
+            : 'Experimental CTC realignment supports English only — transcribe with language "English" to enable it';
+    },
+
+    async realignWordTiming() {
+        if (this._ctcRunning || this._transcribeRunning || this._exportRunning) return;
+        if (!this.transcript || !this.transcript.words.length) return;
+        const audio = this._audioCache;
+        if (!audio || !audio.samples) {
+            Status.warning('The decoded audio for this transcript is no longer in memory — run Transcribe again first.');
+            return;
+        }
+        const transcript = this.transcript;
+
+        // Gap B gate (belt-and-braces with updateCtcUi): the wav2vec2
+        // aligner is English-only; never let another language in.
+        if (!canCtcRealign(transcript)) {
+            Status.warning('CTC realignment supports English only — transcribe with language "English" first.');
+            return;
+        }
+
+        // One-time ~91 MB model download (then cached in the Cache API).
+        // Ask before spending the bandwidth unless it is already cached.
+        let cached = false;
+        try { cached = await isCtcModelCached(); } catch { cached = false; }
+        if (!cached) {
+            const ok = confirm(
+                'Realign word timing (experimental)?\n\n' +
+                'A ~91 MB CTC forced-aligner model is downloaded once and\n' +
+                'reused from this browser\u2019s cache on later runs.\n\n' +
+                'Words the aligner cannot align keep their current timing,\n' +
+                'and "Revert timing" restores everything afterwards.'
+            );
+            if (!ok) return;
+        }
+
+        this._ctcRunning = true;
+        this._ctcCancel = false;
+        this.updateCtcUi();
+        try {
+            Progress.showProgress('Realign Word Timing', 'Loading CTC aligner (experimental)...',
+                () => { this._ctcCancel = true; });
+            if (!ctcAlignerPromise) {
+                ctcAlignerPromise = loadCtcAligner({
+                    onProgress: (p) => {
+                        if (p.stage === 'ready') Progress.update(88, 'Aligner ready');
+                        else if (p.stage === 'download' && typeof p.progress === 'number') {
+                            Progress.update(Math.min(85, Math.round(p.progress * 0.85)),
+                                `Downloading ${p.detail || 'aligner model'}...`);
+                        }
+                    },
+                    shouldCancel: () => this._ctcCancel,
+                }).catch((err) => { ctcAlignerPromise = null; throw err; });
+            }
+            const loaded = await ctcAlignerPromise;
+            if (this._ctcCancel) {
+                Progress.hide();
+                Status.msg('Realign cancelled — timings unchanged.');
+                return;
+            }
+
+            Progress.showProgress('Realign Word Timing', 'Aligning words...',
+                () => { this._ctcCancel = true; });
+            const result = await alignCtcTranscript({
+                words: transcript.words,
+                samples: audio.samples,
+                loaded,
+                onProgress: (p) => {
+                    if (p.stage === 'done') Progress.update(100, 'Applying timing...');
+                    else if (p.windows) Progress.update(Math.round((p.window / p.windows) * 95),
+                        `Aligning window ${p.window}/${p.windows}...`);
+                },
+                shouldCancel: () => this._ctcCancel,
+            });
+            Progress.hide();
+
+            // The transcript or video must not have changed under us.
+            if (this.transcript !== transcript || this.videoFile !== audio.file) {
+                Status.warning('The transcript changed during realign — result discarded.');
+                return;
+            }
+
+            this.saveState();
+            const applied = applyCtcResult(transcript.words, result, {
+                skipUserAdjusted: true,
+                duration: audio.samples.length / 16000,
+            });
+            this._ctcSnapshot = applied.snapshot;
+            this.rebuildLayout();
+            this.renderTranscriptEditor();
+            this.renderTranscriptDisplay();
+            this.updateInspector();
+            this.updatePreview();
+            const skipped = applied.kept - applied.skippedUserAdjusted;
+            let msg = `Realigned ${applied.aligned} of ${applied.aligned + applied.kept} word timings (experimental)`;
+            if (skipped) msg += ` — ${skipped} kept their timing (no CTC evidence)`;
+            if (applied.skippedUserAdjusted) msg += `, ${applied.skippedUserAdjusted} kept your manual timing`;
+            Status.success(msg);
+            if (applied.flaggedInvalid) {
+                Status.warning(`${applied.flaggedInvalid} manually adjusted word ${applied.flaggedInvalid === 1 ? 'timing looks' : 'timings look'} invalid (negative, reversed, or beyond the audio) — kept unchanged, please fix them in the inspector.`);
+            }
+        } catch (err) {
+            Progress.hide();
+            if (err instanceof CtcAlignerError && err.code === 'cancelled') {
+                Status.msg('Realign cancelled — timings unchanged.');
+            } else {
+                console.error('[ctc-realign]', err);
+                Status.error(`Realign failed: ${err && err.message ? err.message : err}`);
+            }
+        } finally {
+            this._ctcRunning = false;
+            this.updateCtcUi();
+        }
+    },
+
+    revertCtcTiming() {
+        if (!this.transcript || !this._ctcSnapshot || this._ctcRunning) return;
+        this.saveState();
+        const n = revertCtcResult(this.transcript.words, this._ctcSnapshot);
+        this._ctcSnapshot = null;
+        this.rebuildLayout();
+        this.renderTranscriptEditor();
+        this.renderTranscriptDisplay();
+        this.updateInspector();
+        this.updatePreview();
+        Status.msg(`Reverted timing on ${n} words — Whisper timings restored.`);
+        this.updateCtcUi();
+    },
+
     async extractAudio() {
         const active = Status.setActive('Extracting audio from video...');
         Progress.show('Extracting Audio', 'Reading video file');
@@ -1337,7 +1520,7 @@ const App = {
             Status.error('FFmpeg is still loading. Please wait and try again.');
             return;
         }
-        if (this._exportRunning || this._transcribeRunning) {
+        if (this._exportRunning || this._transcribeRunning || this._ctcRunning) {
             Status.warning('Another operation is already running');
             return;
         }
@@ -1350,6 +1533,9 @@ const App = {
             Pipeline.activate('transcribe');
             const { samples: audioSamples, duration: audioDuration } = await this.extractAudio();
             if (cancelled) throw { __cancelled: true };
+            // Cache the decoded 16 kHz audio for the experimental CTC
+            // realign — same buffer Whisper is fed, never re-derived.
+            this._audioCache = { samples: audioSamples, file: this.videoFile };
 
             const modelId = document.getElementById('sel-model').value;
             const language = document.getElementById('sel-language').value;
@@ -1409,6 +1595,7 @@ const App = {
             }
 
             this.transcript = transcript;
+            this._ctcSnapshot = null; // fresh transcript ⇒ nothing to revert
             this.transcriptMeta = {
                 model: hubRepo(modelId),
                 processingTime: tEnd - tStart,
@@ -1430,6 +1617,7 @@ const App = {
             this.renderTranscriptEditor();
             this.renderTranscriptDisplay();
             this.updateDiagnostics();
+            this.updateCtcUi();
 
             document.getElementById('btn-export-srt').disabled = false;
             document.getElementById('btn-export-vtt').disabled = false;
@@ -1454,6 +1642,11 @@ const App = {
         } finally {
             this._transcribeRunning = false;
             this._transcribeCancel = null;
+            // updateCtcUi ran above while _transcribeRunning was still true,
+            // which kept Realign/Revert hidden after a successful pass.
+            // Re-evaluate now that the flag is clear (also correct on cancel:
+            // an existing transcript becomes actionable again).
+            this.updateCtcUi();
         }
     },
 
@@ -1525,6 +1718,10 @@ const App = {
         }
         if (!this.ffmpegLoaded) {
             Status.error('FFmpeg is still loading. Please wait.');
+            return;
+        }
+        if (this._ctcRunning) {
+            Status.warning('Word realign is running — wait for it to finish.');
             return;
         }
         if (this._exportRunning || this._transcribeRunning) {
@@ -1859,12 +2056,18 @@ const App = {
             const adjusted = this.isWordAdjusted(word);
             const needsAttention = !!word.estimated && !adjusted;
             chip.className = `word-chip ${word.deleted ? 'deleted' : ''} ${i === this.selectedWordIndex ? 'selected' : ''}`
-                + (adjusted ? ' adjusted' : needsAttention ? ' needs-attention' : '');
+                + (adjusted ? ' adjusted' : needsAttention ? ' needs-attention' : '')
+                + (word.ctcAligned ? ' ctc-aligned' : '');
             if (needsAttention) {
                 chip.title = 'Missing or collapsed timestamp — timing is estimated. '
                     + 'Adjust the text, start, end, split or merge this word to mark it handled.';
             } else if (adjusted) {
                 chip.title = 'Adjusted from the original transcript';
+            }
+            if (word.ctcAligned) {
+                chip.title = 'Word timing set by the experimental CTC aligner (from audio, not Whisper)';
+            } else if (word.ctcReason) {
+                chip.title = `Experimental CTC realign skipped this word (${word.ctcReason}) — kept existing timing`;
             }
             chip.dataset.index = i;
 
@@ -2008,6 +2211,15 @@ const App = {
         
         const mergeBtn = document.getElementById('inspector-merge');
         mergeBtn.disabled = this.selectedWordIndex >= this.transcript.words.length - 1;
+
+        // Experimental CTC alignment provenance (Phase 4).
+        const alignField = document.getElementById('inspector-align-field');
+        const alignNote = document.getElementById('inspector-align-note');
+        let alignText = '';
+        if (word.ctcAligned) alignText = 'Timing: CTC aligner (experimental)';
+        else if (word.ctcReason) alignText = `Timing: Whisper — CTC realign skipped (${word.ctcReason})`;
+        alignField.classList.toggle('hidden', !alignText);
+        alignNote.textContent = alignText;
     },
 
     bindInspectorControls() {

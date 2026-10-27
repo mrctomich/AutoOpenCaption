@@ -157,7 +157,13 @@
             <div id="center-resizer" class="center-resizer" title="Drag to resize panels"></div>
 
             <section class="panel panel-word-editor">
-                <h2>Word Editor</h2>
+                <div class="word-editor-header">
+                    <h2>Word Editor</h2>
+                    <div class="word-editor-header-actions">
+                        <button id="btn-ctc-revert" class="btn-secondary btn-ctc hidden" title="Restore the timings from before the last realign">Revert timing</button>
+                        <button id="btn-ctc-realign" class="btn-secondary btn-ctc hidden" title="Experimental: re-derive word timestamps from the audio with a CTC forced aligner">Realign timing <span class="exp-badge">exp</span></button>
+                    </div>
+                </div>
                 <div id="word-selector" class="word-selector">
                     <p class="placeholder">Import a video and transcribe to see the transcript here.</p>
                 </div>
@@ -183,6 +189,9 @@
                                 <button id="inspector-end-minus" class="btn-nudge" title="-0.05s">-</button>
                                 <button id="inspector-end-plus" class="btn-nudge" title="+0.05s">+</button>
                             </div>
+                        </div>
+                        <div class="inspector-align-note hidden" id="inspector-align-field">
+                            <span id="inspector-align-note"></span>
                         </div>
                         <div class="inspector-actions">
                             <button id="inspector-split" class="btn-secondary">Split</button>
