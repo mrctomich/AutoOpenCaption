@@ -298,3 +298,61 @@ build hooked after transcription where `_audioCache` is set, playhead in the
 preview loop), plus `tests/timeline-model.test.mjs` and
 `tests/waveform.test.mjs`. No caption-box editing until Phase 3. Then update
 this document and STOP.
+
+---
+
+## Phase 2 — Viewport, waveform & timeline dock: COMPLETE (2026-10-27)
+
+**What was built:**
+
+- `app/assets/timeline-model.js` (pure, headless-tested): `Viewport` =
+  `{ durationSec, viewWidthPx, viewStartSec, pps }`; `timeToX`/`xToTime`,
+  `clampViewport` (`pps ∈ [viewWidth/duration, MAX_PPS=600]`,
+  `viewStart ∈ [0, duration − viewWidth/pps]`), `zoomAtAnchor` (cursor
+  anchor, zero drift verified), `panByPixels`, `scrollToTime` (auto-follow),
+  `fit`, ruler step picker from the `…0.1, 0.25, 0.5, 1, 2, 5, …` ladder
+  keeping majors ≥ ~70 px. Pixel values are never persisted.
+- `app/assets/waveform.js` (pure, headless-tested): `createPeakBuilder` —
+  512-sample buckets (≈32 ms) storing min/max as Int16 in a flat
+  `Int16Array`, incremental `feed()` + `snapshot()` handoff;
+  `columnsForRange()` aggregates buckets → per-pixel columns for any zoom.
+  Fixed `quantize()` edge bug found by tests: exactly −1.0 mapped to 0.
+- `app/assets/timeline-view.js`: DPR-aware canvas dock (`#timeline-dock`,
+  180 px default) with ruler band (22 px), waveform band, reserved caption
+  lane strip; pointer-event state machine (ruler click = seek, ruler drag =
+  pan, wave/lane scrub = seek), plain wheel = horizontal scroll,
+  ctrl+wheel = zoom-at-cursor; toolbar zoom in/out/fit + collapse; dock
+  height & collapsed state persist to localStorage (Q2 resolved).
+  CSS-variable colors with MutationObserver re-read (theme-safe); dirty-flag
+  rAF redraw.
+- `App` wiring: `bindTimeline()` in `init()`, `timeline.setTime()` from the
+  preview loop (`timeupdate`), `onSeek` → `video.currentTime`,
+  `buildWaveformPeaks()` slices of 5 s audio (`setTimeout` between) fired
+  right after `_audioCache` is set post-transcription (app.js:1592); new
+  video clears peaks + duration.
+- Q1 (restored session without `_audioCache`): lanes-only mode — dock shows
+  ruler + empty waveform band, no error. Q3/Q4 still open (Phase 3+).
+
+**Files changed:** `app/index.html`, `app/assets/style.css`,
+`app/assets/app.js` (modified); `app/assets/timeline-model.js`,
+`app/assets/waveform.js`, `app/assets/timeline-view.js`,
+`tests/timeline-model.test.mjs`, `tests/waveform.test.mjs` (new).
+
+**Tests:** `node --test tests/*.test.mjs` → **89 pass, 0 fail** (63 baseline
++ 26 new).
+
+**Browser verification (headless, 12 s ffmpeg test clip over local HTTP):**
+video load fits timeline (105.3 pps); ctrl+wheel zoom anchor drift 0.000 s;
+wheel pan clamps at 0; ruler click seek `video.currentTime` matches
+`xToTime` to the millisecond; fake `_audioCache` → 375/375 peak buckets;
+playhead tracks muted playback (Δ < 0.05 s); toolbar zoom/collapse/expand
+all mutate viewport/prefs; waveform pixels present in canvas band (14
+distinct colors incl. accent + AA blends).
+
+**Known limitations:** caption lane strip is a placeholder until Phase 3;
+zoom-to-selection / zoom-word buttons deferred to Phase 3 (selection
+exists then); waveform only appears after transcription (Q1 lanes-only).
+
+**Next phase starting point:** Phase 3 (caption lanes & selection) per
+design above. STOP here — one phase per session.
+

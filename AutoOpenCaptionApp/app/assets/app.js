@@ -4,6 +4,8 @@ import { groupWords, findGroupAtTime, computeLayout, drawGroup, drawDiagnostics 
 import { installResumableFetch, isFileCached } from './resumable-fetch.js';
 import { loadCtcAligner, alignCtcTranscript, CtcAlignerError, CTC_MODEL_ID } from './ctc-aligner.js';
 import { applyCtcResult, revertCtcResult, canCtcRealign } from './ctc-apply.js';
+import { TimelineView } from './timeline-view.js';
+import { createPeakBuilder } from './waveform.js';
 
 const waitForTransformers = () => new Promise((resolve) => {
     if (window.TransformersPipeline) {
@@ -446,6 +448,7 @@ const ModelStatus = {
 // ── Main App ────────────────────────────────────────────────
 const App = {
     video: null,
+    timeline: null, // TimelineView dock (see timeline-view.js)
     canvas: null,
     ctx: null,
     transcript: null,
@@ -508,6 +511,7 @@ const App = {
         this.bindKeyboardShortcuts();
         this.bindInspectorControls();
         this.bindCenterResizer();
+        this.bindTimeline();
         this.updateModelStatus();
         this.updateThemeIcon();
         // Probe where every model lives (bundled folder / download cache /
@@ -781,13 +785,57 @@ const App = {
         this._audioCache = null;
         this._ctcSnapshot = null;
         this.updateCtcUi();
+        // Timeline: empty until the new video loads (peaks die with the audio).
+        this.timeline?.setPeaks(null);
+        this.timeline?.setDuration(0);
         document.getElementById('drop-zone').classList.add('hidden');
+    },
+
+    // ── Timeline dock ───────────────────────────────────────
+    bindTimeline() {
+        this.timeline = new TimelineView(
+            document.getElementById('timeline-dock'),
+            document.getElementById('timeline-canvas'),
+            {
+                onSeek: (t) => {
+                    if (this.video.src && Number.isFinite(this.video.duration)) {
+                        this.video.currentTime = t;
+                    }
+                },
+            },
+        );
+    },
+
+    /**
+     * Build the waveform peak table from the cached decoded audio in ~5 s
+     * slices (setTimeout between slices keeps the UI responsive; the view
+     * draws completed buckets as they arrive). Aborted implicitly when
+     * _audioCache is replaced by a new video/transcription.
+     */
+    buildWaveformPeaks() {
+        const audio = this._audioCache;
+        if (!audio || !this.timeline) return;
+        const builder = createPeakBuilder({ sampleRate: 16000 });
+        const SLICE = 80000; // 5 s of 16 kHz mono float
+        let pos = 0;
+        const step = () => {
+            if (this._audioCache !== audio) return; // stale: newer audio took over
+            const end = Math.min(pos + SLICE, audio.samples.length);
+            builder.feed(audio.samples.subarray(pos, end));
+            pos = end;
+            this.timeline.setPeaks(builder.snapshot());
+            if (pos < audio.samples.length) {
+                setTimeout(step, 0);
+            }
+        };
+        setTimeout(step, 0);
     },
 
     onVideoLoaded() {
         document.getElementById('btn-transcribe').disabled = false;
         document.getElementById('btn-play').disabled = false;
         document.getElementById('scrubber').disabled = false;
+        this.timeline?.setDuration(this.video.duration);
         this.resizeCanvas();
         this.updateTimeDisplay();
         window.addEventListener('resize', () => this.resizeCanvas());
@@ -866,6 +914,9 @@ const App = {
 
     updatePreview() {
         this.updateTimeDisplay();
+        // Timeline playhead follows playback from here (single writer for
+        // that direction; user seeks go the other way via onSeek).
+        if (this.timeline) this.timeline.setTime(this.video.currentTime);
         if (!this.transcript || !this.video.duration) return;
 
         const time = this.video.currentTime;
@@ -1536,6 +1587,9 @@ const App = {
             // Cache the decoded 16 kHz audio for the experimental CTC
             // realign — same buffer Whisper is fed, never re-derived.
             this._audioCache = { samples: audioSamples, file: this.videoFile };
+            // Waveform peaks build from the same buffer while transcription
+            // runs (worker-bound) — the dock fills in progressively.
+            this.buildWaveformPeaks();
 
             const modelId = document.getElementById('sel-model').value;
             const language = document.getElementById('sel-language').value;
