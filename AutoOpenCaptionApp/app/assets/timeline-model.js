@@ -1,5 +1,5 @@
 /**
- * Timeline model — pure logic for the interactive timeline editor (Phase 2).
+ * Timeline model — pure logic for the interactive timeline editor (Phases 2–3).
  *
  * No DOM, no canvas: viewport state, coordinate transforms, zoom/scroll
  * clamps, ruler tick selection, and box display geometry. All time values
@@ -188,4 +188,108 @@ export function boxRect(vp, startSec, endSec) {
         w = MIN_BOX_PX;
     }
     return { x, w, degenerate };
+}
+
+// ── Caption boxes (Phase 3) ───────────────────────────────────────
+/**
+ * Display boxes for caption groups. Input is `App.captionGroups` verbatim —
+ * the same derived array the preview canvas and SRT/VTT export consume, so
+ * box boundaries match exported cue boundaries exactly (acceptance P3).
+ *
+ * Purely visual: x/w come from the viewport at call time, and the stored
+ * `start`/`end` on the groups are NEVER read back from or written to here.
+ * Boxes keep their input array index so hit results map back to groups.
+ */
+export function groupBoxes(vp, groups) {
+    if (!groups || !groups.length) return [];
+    return groups.map((g, index) => {
+        const r = boxRect(vp, g.start, g.end);
+        return {
+            index,
+            group: g,
+            x: r.x,
+            w: r.w,
+            degenerate: r.degenerate,
+            // Word the box selects on click: the group's first live word.
+            word: g.words && g.words.length ? g.words[0] : null,
+        };
+    });
+}
+
+/**
+ * Greedy lane packing: boxes land in the first lane whose last visual
+ * extent ends before this box starts (±1 px slack absorbs float wobble of
+ * back-to-back cues). Packing runs in the input order (= cue order), which
+ * keeps each lane chronologically sorted and stable across redraws.
+ * Returns `{ laneOf: number[], laneCount }`.
+ */
+export function packLanes(boxes, slackPx = 1) {
+    const laneOf = new Array(boxes.length).fill(0);
+    const laneEnds = []; // visual right edge of the last box per lane
+    for (let i = 0; i < boxes.length; i++) {
+        const b = boxes[i];
+        let placed = false;
+        for (let l = 0; l < laneEnds.length; l++) {
+            if (b.x >= laneEnds[l] - slackPx) {
+                laneOf[i] = l;
+                laneEnds[l] = b.x + b.w;
+                placed = true;
+                break;
+            }
+        }
+        if (!placed) {
+            laneOf[i] = laneEnds.length;
+            laneEnds.push(b.x + b.w);
+        }
+    }
+    return { laneOf, laneCount: Math.max(1, laneEnds.length) };
+}
+
+/**
+ * Hit-test a point against packed caption boxes. Returns the input index of
+ * the topmost (last-drawn) box under the point, or null. `padPx` grows each
+ * box's hit area so MIN_BOX_PX slivers stay clickable (R6); the lane strip's
+ * vertical bounds are the caller's business.
+ */
+export function hitTestBoxes(boxes, laneOf, xPx, yPx, laneTop, laneH, padPx = 2) {
+    for (let i = boxes.length - 1; i >= 0; i--) {
+        const b = boxes[i];
+        if (laneOf[i] == null) continue;
+        const y0 = laneTop + laneOf[i] * laneH;
+        if (yPx < y0 - padPx || yPx > y0 + laneH + padPx) continue;
+        if (xPx >= b.x - padPx && xPx <= b.x + b.w + padPx) return i;
+    }
+    return null;
+}
+
+/**
+ * Viewport framing a [start, end] span (zoom-to-selection): if the span is
+ * already visible with the requested margin, the viewport is returned
+ * unchanged; otherwise zoom in just enough (never past MAX_PPS) and pan so
+ * the span is centered with `marginPx` breathing room on both sides.
+ *
+ * Zero-duration spans (collapsed/degenerate cues, or framing the playhead
+ * with no selection) have no extent to check, so the stay-put rule cannot
+ * apply: framing a point always zooms in one multiplicative step and stays
+ * bounded by MAX_PPS, so repeated presses drill in and then stop instead of
+ * silently doing nothing.
+ */
+export function frameSpan(vp, startSec, endSec, marginPx = 48) {
+    if (!(vp.pps > 0) || !Number.isFinite(startSec)) return { ...vp };
+    const end = Number.isFinite(endSec) ? Math.max(endSec, startSec) : startSec;
+    // Already fully visible with the margin? Stay put (positive spans only).
+    if (end > startSec) {
+        const marginSec = marginPx / vp.pps;
+        if (startSec >= vp.viewStartSec + marginSec && end <= viewEndTime(vp) - marginSec) {
+            return { ...vp };
+        }
+    }
+    // Zoom in only as far as needed to fit span + margin (never past MAX_PPS,
+    // never below the current zoom).
+    const needPps = vp.viewWidthPx / (end - startSec + 2 * (marginPx / Math.max(vp.pps, 1e-9)));
+    const targetPps = clampPps(vp, Math.min(Math.max(vp.pps, needPps), MAX_PPS));
+    const next = { ...vp, pps: targetPps };
+    const center = (startSec + end) / 2;
+    next.viewStartSec = clampViewStart(next, center - (next.viewWidthPx / targetPps) / 2);
+    return next;
 }

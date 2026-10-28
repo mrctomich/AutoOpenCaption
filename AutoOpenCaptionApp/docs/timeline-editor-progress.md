@@ -14,15 +14,15 @@ the next phase only starts when the user authorizes it in a fresh session.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Repository investigation & technical design | **DONE 2026-10-27** (this document) |
-| 2 | Timeline panel foundation: ruler, waveform, scroll, zoom, playhead | not started |
-| 3 | Caption boxes + selection sync + double-click seek | not started |
+| 2 | Timeline panel foundation: ruler, waveform, scroll, zoom, playhead | **DONE 2026-10-27** |
+| 3 | Caption boxes + selection sync + double-click seek | **DONE 2026-10-28** |
 | 4 | Direct caption timing edits (drag move, edge resize) | not started |
 | 5 | Create missing captions/words, undo/redo integration | not started |
 | 6 | Integration, regression testing, polish | not started |
 
 ## How to resume (fresh session)
 
-1. `cd AutoOpenCaptionApp && node --test tests/*.test.mjs` — must be **63 pass / 0 fail** before starting (baseline verified 2026-10-27 on this branch; Phase 1 changed no code).
+1. `cd AutoOpenCaptionApp && node --test tests/*.test.mjs` — must be **107 pass / 0 fail** before starting (baseline verified 2026-10-28 on this branch after Phase 3; was 63 at Phase 1, 89 after Phase 2).
 2. Read this file (architecture + design below) — do not re-explore the repo from scratch.
 3. Begin the next unchecked phase above. Finish its tests, append its record, STOP.
 4. Push note: plain `git push` hangs here (Git Credential Manager prompt with no TTY). Working command:
@@ -356,3 +356,64 @@ exists then); waveform only appears after transcription (Q1 lanes-only).
 **Next phase starting point:** Phase 3 (caption lanes & selection) per
 design above. STOP here — one phase per session.
 
+
+---
+
+## Phase 3 — Caption boxes, selection sync & zoom-to-selection: COMPLETE (2026-10-28)
+
+**What was built:**
+
+- `timeline-model.js` (pure, headless-tested): `groupBoxes()` maps live
+  `App.captionGroups` → lane boxes (`boxRect` honours `MIN_BOX_PX = 4`:
+  zero/collapsed cues stay visible+clickable slivers when zoomed out);
+  `packLanes()` greedy interval packing (overlap → separate lanes, laneOf
+  indexed parallel to boxes); `hitTestBoxes()` topmost-first with `padPx`
+  hit-area growth; `frameSpan()` zoom-to-selection (already-visible span →
+  viewport unchanged; else zoom in just enough, never past `MAX_PPS`, center
+  the span; zero-duration span always drills one multiplicative step).
+- `timeline-view.js`: caption lane strip is real — draws packed boxes per
+  frame (selected group highlighted via CSS vars), pointer state machine
+  extended: box click = select first word (no seek), double-click = seek to
+  group start, shift-click on selected word = deselect; toolbar
+  `Sel` button (`#btn-tl-zoom-sel`) → `zoomToSelected()` (selected cue, else
+  playhead); `setSelectedWord(wordId)` reverse-sync API.
+- `app.js` wiring: `getGroups: () => this.captionGroups` (boxes always
+  mirror exported cue boundaries; `rebuildLayout()` ends with
+  `timeline.invalidate()`); `onTimelineSelectGroup({ word, seek, toggle })`
+  → `selectWord(idx, { seek })` — editor stays the selection authority, box
+  highlight follows via `selectWord → setSelectedWord`; `selectWord` gained
+  the `{ seek = true }` option (box clicks pass `seek: false`). Global
+  outside-click deselect now exempts the whole `#timeline-dock` (document
+  click fires before toolbar button handlers; zoom-to-selection would
+  otherwise always see an empty selection).
+- Word data is NEVER mutated by Phase 3 interactions (R7): stored
+  `word.start/end` byte-identical after all box/zoom interactions.
+
+**Files changed:** `app/assets/timeline-model.js`, `timeline-view.js`,
+`app.js`, `app/index.html` (modified); `tests/timeline-lanes.test.mjs` (new).
+
+**Tests:** `node --test tests/*.test.mjs` → **107 pass, 0 fail** (89 + 18
+new lane/framing tests).
+
+**Browser verification (headless Playwright, 12 s clip, 15/15 checks):**
+groups derived from captionGroups; overlapping cues pack to lane 2;
+collapsed cue renders 4 px sliver; box x/w match group times; click selects
+first word WITHOUT seeking; timeline highlights selected group; double-click
+seeks to group start; editor word-select highlights its box (reverse sync);
+shift-click deselects; zoom-to-selection stays put when the cue is fully
+visible (stay-put rule); zoom-to-selection frames an off-screen cue (view
+9.38–12 s → 4.95–7.35 s, cue 6–6.3 centered); stored word times unchanged.
+
+**Pitfalls learned (QA-script side, not app bugs):** the QA script must run
+with stdin redirected (`node tl_phase3_qa.js < /dev/null`) — otherwise
+Playwright sees the open pipe and every evaluate dies with "stdin is not a
+tty". Stay-put at fit zoom is CORRECT behaviour (whole video visible = span
+framed); test the framing branch by zooming in + panning the cue off-screen
+first.
+
+**Known limitations:** boxes are display/selection only — no drag-move or
+edge-resize yet (Phase 4); lane count is unbounded (fine for realistic
+grouping).
+
+**Next phase starting point:** Phase 4 (direct timing edits: drag move, edge
+resize) per design. STOP here — one phase per session.

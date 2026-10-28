@@ -566,7 +566,16 @@ const App = {
         document.addEventListener('click', (e) => {
             const selector = document.getElementById('word-selector');
             const inspector = document.getElementById('word-inspector');
-            if (!selector.contains(e.target) && !inspector.contains(e.target)) {
+            // The timeline dock manages its own selection (Phase 3): a box
+            // click selects via onTimelineSelectGroup, and this global
+            // outside-click deselect must not cancel it in the same event.
+            // The whole dock counts, not just the canvas: toolbar buttons
+            // (Sel/zoom) act ON the selection, and document-level click fires
+            // before the button's own handler — deselecting here would make
+            // zoom-to-selection always see an empty selection.
+            const dock = document.getElementById('timeline-dock');
+            if (!selector.contains(e.target) && !inspector.contains(e.target)
+                && !(dock && dock.contains(e.target))) {
                 this.selectWord(-1);
             }
         });
@@ -802,8 +811,32 @@ const App = {
                         this.video.currentTime = t;
                     }
                 },
+                // Live caption groups — rebuilt by rebuildLayout() after every
+                // edit, so lane boxes always match exported cue boundaries.
+                getGroups: () => this.captionGroups || [],
+                onSelectGroup: (sel) => this.onTimelineSelectGroup(sel),
             },
         );
+    },
+
+    /**
+     * Caption box clicked/double-clicked in the timeline (Phase 3).
+     * Click selects the group's first word WITHOUT seeking (the editor stays
+     * the selection authority; the box highlight follows via selectWord →
+     * setSelectedWord); double-click additionally seeks to the group start
+     * (matches word-chip double-click-to-jump semantics). Shift-click on the
+     * already-selected word deselects.
+     */
+    onTimelineSelectGroup({ word, seek = false, toggle = false }) {
+        if (!word || !this.transcript) return;
+        const idx = this.transcript.words.indexOf(word);
+        if (idx < 0) return; // word no longer in the transcript (stale frame)
+        if (toggle && idx === this.selectedWordIndex && !seek) {
+            this.selectWord(-1);
+            return;
+        }
+        // seek:false keeps a plain box click from moving the playhead.
+        this.selectWord(idx, { seek });
     },
 
     /**
@@ -882,10 +915,13 @@ const App = {
         if (!this.transcript) {
             this.captionGroups = [];
             this.captionLayout = [];
-            return;
+        } else {
+            this.captionGroups = groupWords(this.transcript.words, this.style.grouping);
+            this.captionLayout = computeLayout(this.captionGroups, this.style, this.canvas.width, this.canvas.height);
         }
-        this.captionGroups = groupWords(this.transcript.words, this.style.grouping);
-        this.captionLayout = computeLayout(this.captionGroups, this.style, this.canvas.width, this.canvas.height);
+        // Caption boxes in the timeline mirror the exported cue boundaries,
+        // so every grouping/layout rebuild refreshes the lanes.
+        this.timeline?.invalidate();
     },
 
     togglePlay() {
@@ -2155,7 +2191,7 @@ const App = {
         }
     },
 
-    selectWord(index) {
+    selectWord(index, { seek = true } = {}) {
         const activeEl = document.activeElement;
         if (activeEl && activeEl.contentEditable === 'true') {
             activeEl.blur();
@@ -2164,10 +2200,16 @@ const App = {
         this.selectedWordIndex = index;
         this.renderTranscriptEditor();
         this.updateInspector();
+        // Phase 3 sync: the timeline highlights the caption box containing
+        // the selected word (no-op when the dock has no groups yet).
+        this.timeline?.setSelectedWord(
+            (index >= 0 && this.transcript) ? this.transcript.words[index]?.id ?? null : null);
         
         // Clicking a word always moves the playhead to its start time,
         // whether or not the video is playing — makes precise editing easy.
-        if (index >= 0 && this.transcript && this.video && this.video.src) {
+        // Timeline box clicks pass seek:false (select without moving the
+        // playhead; double-click seeks) — design rule for the editor⇄timeline sync.
+        if (seek && index >= 0 && this.transcript && this.video && this.video.src) {
             const word = this.transcript.words[index];
             this.video.currentTime = word.start;
         }

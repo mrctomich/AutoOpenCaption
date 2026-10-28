@@ -1,31 +1,37 @@
 /**
- * TimelineView — DOM/canvas glue for the timeline dock (Phase 2).
+ * TimelineView — DOM/canvas glue for the timeline dock (Phases 2–3).
  *
  * One DPR-aware canvas with three bands: ruler, waveform, caption lanes
- * (lanes are placeholders until Phase 3 draws caption boxes). Owns the
+ * (Phase 3 draws real caption boxes from App.captionGroups). Owns the
  * viewport (from timeline-model.js), the pointer/wheel state machine and a
  * dirty-flag rAF redraw. It NEVER stores timestamps: playback position is
- * pushed in via setTime() from the app's preview loop, and user seeks go
- * out through the onSeek callback — one writer per direction (design rule).
+ * pushed in via setTime() from the app's preview loop, caption data is
+ * pulled per-draw through getGroups(), and user seeks go out through the
+ * onSeek callback — one writer per direction (design rule).
  *
  * Interaction map (design doc):
  *   wheel                → horizontal scroll
  *   ctrl+wheel           → zoom at cursor
  *   drag ruler           → pan
  *   click ruler          → seek
- *   drag waveform/lane   → scrub (continuous seek)
+ *   drag waveform        → scrub (continuous seek)
+ *   click caption box    → select first word (NO seek)
+ *   dbl-click box / Enter→ seek to group start
+ *   drag box / drag empty lane → pan (scrub once released off a box)
  * Dock height + collapsed state persist to localStorage (Q2 decision).
  */
 
 import {
     createViewport, zoomAtAnchor, panByPixels, fitViewport, scrollToTime,
     timeToX, xToTime, pickRulerStep, rulerTicks, formatRulerTime,
+    groupBoxes, packLanes, hitTestBoxes, frameSpan, MIN_BOX_PX,
 } from './timeline-model.js';
 import { columnsFromPeaks } from './waveform.js';
 
 const STORAGE_KEY = '***';
 const RULER_H = 22;
-const LANE_H = 46;           // caption-lane placeholder band (Phase 3 fills it)
+const LANE_H = 22;           // one caption lane row
+const LANE_MIN_H = 24;       // lane strip when there are no lanes to show
 const MIN_HEIGHT = 130;
 const MAX_HEIGHT_FRAC = 0.6; // of window height
 
@@ -42,18 +48,30 @@ export class TimelineView {
      * @param container  #timeline-dock element
      * @param canvas     #timeline-canvas element
      * @param onSeek     (timeSec) => void — user-initiated seek (ruler click, scrub)
+     * @param getGroups  () => CaptionGroup[] — live caption groups (App.captionGroups)
+     * @param onSelectGroup ({ groupIndex, word, seek, toggle }) => void — box click
      */
-    constructor(container, canvas, { onSeek = () => {} } = {}) {
+    constructor(container, canvas, { onSeek = () => {}, getGroups = () => [], onSelectGroup = () => {} } = {}) {
         this.container = container;
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
         this.onSeek = onSeek;
+        this.getGroups = getGroups;
+        this.onSelectGroup = onSelectGroup;
 
         this.viewport = createViewport({ durationSec: 0, viewWidthPx: 0 });
         this.peaks = null;
         this.playheadTime = 0;
         this.needsRedraw = false;
         this._raf = 0;
+
+        // Selection is pushed IN (editor ⇄ timeline sync lives in App);
+        // the view only renders it and reports clicks out.
+        this.selectedGroupIndex = -1;
+        // Lane geometry recomputed each draw, kept for hit-testing.
+        this._laneBoxes = [];
+        this._laneOf = [];
+        this._laneTop = 0;
 
         this.colors = null;
         this._readColors();
@@ -101,9 +119,30 @@ export class TimelineView {
 
     /** Push playback position (called from the preview loop / seeked). */
     setTime(t) {
-        if (Number.isFinite(t)) this.playheadTime = t;
+        if (!Number.isFinite(t) || t === this.playheadTime) return;
+        this.playheadTime = t;
         const el = this.container.querySelector('#timeline-time');
-        if (el) el.textContent = this._formatClock(this.playheadTime);
+        if (el) el.textContent = this._formatClock(t);
+        this.invalidate();
+    }
+
+    /** Push the editor's selected word: highlight its caption box. -1 = none. */
+    setSelectedWord(wordId) {
+        const next = wordId == null ? -1
+            : this.getGroups().findIndex(g => g.words && g.words.some(w => w.id === wordId));
+        if (next === this.selectedGroupIndex) return;
+        this.selectedGroupIndex = next;
+        this.invalidate();
+    }
+
+    /** Zoom-to-selection: frame the selected caption (or playhead if none). */
+    zoomToSelected() {
+        const g = this.getGroups()[this.selectedGroupIndex];
+        if (g) {
+            this.viewport = frameSpan(this.viewport, g.start, g.end);
+        } else {
+            this.viewport = frameSpan(this.viewport, this.playheadTime, this.playheadTime);
+        }
         this.invalidate();
     }
 
@@ -187,6 +226,7 @@ export class TimelineView {
         q('btn-tl-zoom-in')?.addEventListener('click', () => this.zoomBy(1.6));
         q('btn-tl-zoom-out')?.addEventListener('click', () => this.zoomBy(1 / 1.6));
         q('btn-tl-zoom-fit')?.addEventListener('click', () => this.fit());
+        q('btn-tl-zoom-sel')?.addEventListener('click', () => this.zoomToSelected());
         q('btn-tl-collapse')?.addEventListener('click', () => {
             this.collapsed = !this.collapsed;
             this._applyCollapsed();
@@ -227,18 +267,38 @@ export class TimelineView {
         });
     }
 
-    _bandFor(y) {
-        const h = this.canvas.clientHeight;
-        if (y <= RULER_H) return 'ruler';
-        if (y >= h - LANE_H) return 'lane';
-        return 'wave';
+    /** Height of the caption-lane strip for the current lane count. */
+    _laneStripH(laneCount) {
+        return Math.max(LANE_MIN_H, laneCount * LANE_H + 4);
+    }
+
+    /**
+     * Recompute caption boxes + lane packing for the current viewport.
+     * Called once per draw and before hit-testing; results cached on the
+     * instance (boxes derive from the live groups — never stored timestamps).
+     */
+    _refreshLanes(h) {
+        const groups = (this.getGroups() && this.getGroups()) || [];
+        this._laneBoxes = groupBoxes(this.viewport, groups);
+        const { laneOf, laneCount } = packLanes(this._laneBoxes);
+        this._laneOf = laneOf;
+        // Cap the strip so the waveform keeps a usable minimum height;
+        // boxes in hidden lanes simply pack down into fewer visible rows.
+        const maxStrip = Math.max(LANE_MIN_H, h - RULER_H - 6 - 30);
+        const stripH = Math.min(this._laneStripH(laneCount), maxStrip);
+        this._laneTop = h - stripH;
+        return stripH;
     }
 
     _bindPointer() {
         const c = this.canvas;
         c.style.touchAction = 'none';
-        let mode = null; // 'pan' | 'scrub' | 'ruler'
-        let startX = 0, startView = 0, moved = false;
+        let mode = null;     // 'ruler' | 'box' | 'lane-empty' | 'scrub'
+        let startX = 0, startY = 0, startView = 0, moved = false;
+        let hitIndex = null; // box index under pointerdown (lane band)
+
+        const seekAt = (x) => this.onSeek(
+            Math.min(Math.max(xToTime(this.viewport, x), 0), this.viewport.durationSec));
 
         c.addEventListener('pointerdown', (e) => {
             if (this.viewport.durationSec <= 0) return;
@@ -246,24 +306,41 @@ export class TimelineView {
             c.setPointerCapture(e.pointerId);
             const r = c.getBoundingClientRect();
             const x = e.clientX - r.left;
-            startX = e.clientX;
-            mode = this._bandFor(e.clientY - r.top) === 'ruler' ? 'ruler' : 'scrub';
+            const y = e.clientY - r.top;
+            startX = e.clientX; startY = e.clientY;
             startView = this.viewport.viewStartSec;
             moved = false;
-            if (mode === 'scrub') this.onSeek(Math.min(Math.max(xToTime(this.viewport, x), 0), this.viewport.durationSec));
+            hitIndex = null;
+
+            if (y <= RULER_H) {
+                mode = 'ruler';
+            } else if (y >= this._laneTop) {
+                // Lane band: resolve the box under the cursor against the
+                // last drawn frame's geometry (lanes are cheap to re-pack).
+                this._refreshLanes(c.clientHeight);
+                hitIndex = hitTestBoxes(this._laneBoxes, this._laneOf, x, y,
+                                        this._laneTop, LANE_H);
+                mode = hitIndex != null ? 'box' : 'lane-empty';
+            } else {
+                mode = 'scrub';
+                seekAt(x); // waveform scrub is immediate, like the old dock
+            }
         });
 
         c.addEventListener('pointermove', (e) => {
             if (!mode) return;
             const dx = e.clientX - startX;
-            if (Math.abs(dx) > 3) moved = true;
-            if (mode === 'ruler' && moved) {
+            const dy = e.clientY - startY;
+            if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
+            if (!moved) return;
+            if (mode === 'scrub') {
+                const r = c.getBoundingClientRect();
+                seekAt(e.clientX - r.left);
+            } else {
+                // ruler drag, box drag, empty-lane drag → pan
                 this.viewport = { ...this.viewport, viewStartSec: startView };
                 this.viewport = panByPixels(this.viewport, dx);
-            } else if (mode === 'scrub') {
-                const r = c.getBoundingClientRect();
-                const x = e.clientX - r.left;
-                this.onSeek(Math.min(Math.max(xToTime(this.viewport, x), 0), this.viewport.durationSec));
+                this.invalidate();
             }
         });
 
@@ -271,13 +348,71 @@ export class TimelineView {
             if (!mode) return;
             const r = c.getBoundingClientRect();
             const x = e.clientX - r.left;
-            if (mode === 'ruler' && !moved) {
-                this.onSeek(Math.min(Math.max(xToTime(this.viewport, x), 0), this.viewport.durationSec));
+            if (!moved) {
+                if (mode === 'ruler') {
+                    seekAt(x);
+                } else if (mode === 'box') {
+                    const box = this._laneBoxes[hitIndex];
+                    if (box) {
+                        // Select WITHOUT seeking (design: click selects,
+                        // dbl-click / Enter seeks). Shift toggles.
+                        this.onSelectGroup({
+                            groupIndex: box.index,
+                            word: box.word,
+                            seek: false,
+                            toggle: e.shiftKey,
+                        });
+                    }
+                } else if (mode === 'lane-empty') {
+                    seekAt(x);
+                }
             }
             mode = null;
+            hitIndex = null;
         };
         c.addEventListener('pointerup', end);
-        c.addEventListener('pointercancel', () => { mode = null; });
+        c.addEventListener('pointercancel', () => { mode = null; hitIndex = null; });
+
+        // Double-click a caption box → seek to the group start (existing
+        // selectWord seek semantics, applied by the App callback).
+        c.addEventListener('dblclick', (e) => {
+            if (this.viewport.durationSec <= 0) return;
+            const r = c.getBoundingClientRect();
+            const x = e.clientX - r.left;
+            const y = e.clientY - r.top;
+            if (y < this._laneTop) return;
+            const i = hitTestBoxes(this._laneBoxes, this._laneOf, x, y,
+                                   this._laneTop, LANE_H);
+            if (i != null && this._laneBoxes[i]) {
+                this.onSelectGroup({
+                    groupIndex: i,
+                    word: this._laneBoxes[i].word,
+                    seek: true,
+                    toggle: false,
+                });
+            }
+        });
+
+        // Keyboard parity for the above: with the canvas focused, Enter seeks
+        // to the selected group's start (or the playhead when nothing is
+        // selected). The canvas is focusable (tabindex) but takes no other
+        // keys — global shortcuts (Ctrl+Z, Delete, …) still reach the app.
+        c.setAttribute('tabindex', '0');
+        c.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter' || this.viewport.durationSec <= 0) return;
+            e.preventDefault();
+            const g = this.getGroups()[this.selectedGroupIndex];
+            if (g) {
+                this.onSelectGroup({
+                    groupIndex: this.selectedGroupIndex,
+                    word: (g.words && g.words[0]) || null,
+                    seek: true,
+                    toggle: false,
+                });
+            } else {
+                this.onSeek(this.playheadTime);
+            }
+        });
     }
 
     _bindWheel() {
@@ -315,12 +450,12 @@ export class TimelineView {
             return;
         }
 
+        const stripH = this._refreshLanes(h);
         const wfTop = RULER_H + 2;
-        const wfH = Math.max(30, h - RULER_H - LANE_H - 6);
-        const laneTop = h - LANE_H;
+        const wfH = Math.max(30, h - RULER_H - stripH - 6);
 
         this._drawWaveform(w, wfTop, wfH);
-        this._drawLanes(w, laneTop, LANE_H);
+        this._drawLanes(w, this._laneTop, stripH);
         this._drawRuler(w);
         this._drawPlayhead(w, h);
     }
@@ -404,20 +539,73 @@ export class TimelineView {
     }
 
     _drawLanes(w, top, height) {
-        const ctx = this.ctx;
+        const ctx = this.ctx, vp = this.viewport;
         ctx.fillStyle = this.colors.raised;
         ctx.fillRect(0, top, w, height);
         ctx.strokeStyle = this.colors.border;
-        ctx.setLineDash([4, 4]);
         ctx.beginPath();
         ctx.moveTo(0, top + 0.5); ctx.lineTo(w, top + 0.5);
         ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.fillStyle = this.colors.muted;
-        ctx.font = '11px var(--font-sans, sans-serif)';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('Caption lanes — boxes arrive in Phase 3', 8, top + height / 2);
+
+        const boxes = this._laneBoxes;
+        if (!boxes.length) {
+            ctx.fillStyle = this.colors.muted;
+            ctx.font = '11px var(--font-sans, sans-serif)';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('Caption lanes are empty — transcribe to fill them',
+                         8, top + height / 2);
+            return;
+        }
+
+        for (let i = 0; i < boxes.length; i++) {
+            const b = boxes[i];
+            const lane = this._laneOf[i];
+            if (b.x > w || b.x + b.w < 0) continue;
+            const y = top + lane * LANE_H + 3;
+            const bh = LANE_H - 6;
+            const selected = i === this.selectedGroupIndex;
+
+            // Box fill — selected uses the accent, like the editor chip.
+            ctx.fillStyle = this.colors.accent;
+            ctx.globalAlpha = selected ? 0.55 : 0.16;
+            this._roundRect(ctx, b.x, y, b.w, bh, 3);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+
+            // Border; degenerate (zero/near-zero duration) cues get a dashed
+            // warning outline so they stay visible AND recognizable (R6).
+            ctx.strokeStyle = selected ? this.colors.accent
+                : (b.degenerate ? this.colors.danger : this.colors.muted);
+            if (b.degenerate) ctx.setLineDash([3, 2]);
+            this._roundRect(ctx, b.x, y, b.w, bh, 3);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Text label when the box is wide enough to fit ~3+ glyphs.
+            if (b.w >= 28 && b.group.text) {
+                ctx.save();
+                this._roundRect(ctx, b.x, y, b.w, bh, 3);
+                ctx.clip();
+                ctx.fillStyle = selected ? this.colors.text : this.colors.muted;
+                ctx.font = '10px var(--font-sans, sans-serif)';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(b.group.text, b.x + 5, y + bh / 2, b.w - 8);
+                ctx.restore();
+            }
+        }
+    }
+
+    _roundRect(ctx, x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.arcTo(x + w, y, x + w, y + h, rr);
+        ctx.arcTo(x + w, y + h, x, y + h, rr);
+        ctx.arcTo(x, y + h, x, y, rr);
+        ctx.arcTo(x, y, x + w, y, rr);
+        ctx.closePath();
     }
 
     _drawPlayhead(w, h) {
