@@ -1,5 +1,5 @@
 /**
- * Timeline model — pure logic for the interactive timeline editor (Phases 2–3).
+ * Timeline model — pure logic for the interactive timeline editor (Phases 2–4).
  *
  * No DOM, no canvas: viewport state, coordinate transforms, zoom/scroll
  * clamps, ruler tick selection, and box display geometry. All time values
@@ -200,7 +200,7 @@ export function boxRect(vp, startSec, endSec) {
  * `start`/`end` on the groups are NEVER read back from or written to here.
  * Boxes keep their input array index so hit results map back to groups.
  */
-export function groupBoxes(vp, groups) {
+export function groupBoxes(vp, groups, allWords = null) {
     if (!groups || !groups.length) return [];
     return groups.map((g, index) => {
         const r = boxRect(vp, g.start, g.end);
@@ -212,6 +212,12 @@ export function groupBoxes(vp, groups) {
             degenerate: r.degenerate,
             // Word the box selects on click: the group's first live word.
             word: g.words && g.words.length ? g.words[0] : null,
+            // Transcript-array index per group word (parallel to g.words;
+            // -1 when not resolvable). Phase 4 word-level edits need it;
+            // indexOf on live word objects, so it reflects the CURRENT array.
+            wordIndex: (allWords && g.words)
+                ? g.words.map(w => allWords.indexOf(w))
+                : undefined,
         };
     });
 }
@@ -292,4 +298,177 @@ export function frameSpan(vp, startSec, endSec, marginPx = 48) {
     const center = (startSec + end) / 2;
     next.viewStartSec = clampViewStart(next, center - (next.viewWidthPx / targetPps) / 2);
     return next;
+}
+
+// ── Direct timing edits (Phase 4) ─────────────────────────────────
+// Gesture resolution and clamping are PURE: the view drags a ghost and the
+// App commits through the same functions, so the ghost always shows exactly
+// what the commit will produce. Data is only ever touched once, on commit
+// (design: no per-move writes).
+
+/** Pointer grab zone within a box: 'left' | 'right' edge or 'body'. */
+export function grabZone(xInBox, boxW, edgePx = 5) {
+    if (boxW >= 2 * edgePx + 2) {
+        if (xInBox < edgePx) return 'left';
+        if (xInBox > boxW - edgePx) return 'right';
+    }
+    return 'body';
+}
+
+/** Word sub-boxes become visible (and word-gesture-grabbable) at this zoom (Q3). */
+export const WORD_SUB_PPS = 120;
+
+/**
+ * Resolve the gesture for a press inside a caption box.
+ *
+ *  - `zone`  : grabZone() result for the box body/edges.
+ *  - `wordIndexInGroup`: index of the word under the cursor within
+ *              box.group.words when zoomed past WORD_SUB_PPS (else null).
+ *  - `wordIndex`: that word's index in the transcript's full words array.
+ *
+ * Edge zones drill to word-edge resizes when a word is under the cursor;
+ * body zones drag the whole word when a word is under the cursor, else the
+ * whole group. Returns null for nothing grabbable (caller falls back to
+ * pan/seek).
+ */
+export function resolveGesture({ zone, wordIndexInGroup = null, wordIndex = -1, groupIndex }) {
+    const wordGrab = wordIndexInGroup != null && wordIndex >= 0;
+    if (zone === 'left') {
+        return wordGrab
+            ? { kind: 'word-resize', wordIndex, edge: 'start' }
+            : { kind: 'group-resize', groupIndex, edge: 'start' };
+    }
+    if (zone === 'right') {
+        return wordGrab
+            ? { kind: 'word-resize', wordIndex, edge: 'end' }
+            : { kind: 'group-resize', groupIndex, edge: 'end' };
+    }
+    return wordGrab
+        ? { kind: 'word-move', wordIndex }
+        : { kind: 'group-move', groupIndex };
+}
+
+/**
+ * Live (non-deleted) neighbour bounds around [fromIdx, toIdx] in the FULL
+ * transcript word array: prevEnd = end of the closest live word before the
+ * span, nextStart = start of the closest live word after it. Infinity when
+ * none — the span is the first/last live word.
+ */
+export function liveNeighborBounds(words, fromIdx, toIdx) {
+    let prevEnd = -Infinity;
+    let nextStart = Infinity;
+    for (let i = 0; i < words.length; i++) {
+        const w = words[i];
+        if (w.deleted) continue; // words inside the span match neither branch
+        if (i < fromIdx) prevEnd = Math.max(prevEnd, w.end);
+        else if (i > toIdx) nextStart = Math.min(nextStart, w.start);
+    }
+    return { prevEnd, nextStart };
+}
+
+/**
+ * Allowed drag delta (seconds) for a gesture given the CURRENT word data.
+ * Clamps per design: start ≥ 0, end ≤ duration, start ≤ end, and stricter
+ * than the inspector — drags may not cross a live neighbour's edge, keeping
+ * words monotonically ordered (the existing word array order is playback
+ * order). Returns `{ lo, hi }` (may be lo > hi when the data already
+ * violates the rules; clampDelta then pins to `hi`).
+ */
+export function editBounds(gesture, words, durationSec) {
+    const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : Infinity;
+    const w = (i) => (i >= 0 && i < words.length ? words[i] : null);
+
+    if (gesture.kind === 'word-move' || gesture.kind === 'word-resize') {
+        const word = w(gesture.wordIndex);
+        if (!word) return { lo: 0, hi: 0 };
+        const { prevEnd, nextStart } = liveNeighborBounds(words, gesture.wordIndex, gesture.wordIndex);
+        if (gesture.kind === 'word-move') {
+            // Whole word translates, duration preserved.
+            return {
+                lo: Math.max(0 - word.start, prevEnd - word.start),
+                hi: Math.min(dur - word.end, nextStart - word.end),
+            };
+        }
+        if (gesture.edge === 'start') {
+            // New start ∈ [prevEnd, word.end] ∩ [0, ∞).
+            return {
+                lo: Math.max(0, prevEnd) - word.start,
+                hi: word.end - word.start,
+            };
+        }
+        // edge === 'end': new end ∈ [word.start, nextStart] ∩ [.., dur].
+        return {
+            lo: word.start - word.end,
+            hi: Math.min(dur, nextStart) - word.end,
+        };
+    }
+
+    // Group gestures need the group's word list → editBoundsForGroup().
+    return { lo: 0, hi: 0 };
+}
+
+/**
+ * Bounds for a GROUP gesture. `groupWordsArr` is the group's live words and
+ * `wordIndexes` their parallel indices in the full transcript array (from
+ * groupBoxes). Move translates every word (duration and internal gaps
+ * preserved); resize-start moves only the first word's start, resize-end
+ * only the last word's end.
+ */
+export function editBoundsForGroup(gesture, allWords, groupWordsArr, wordIndexes, durationSec) {
+    const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : Infinity;
+    if (!groupWordsArr || !groupWordsArr.length) return { lo: 0, hi: 0 };
+    const idxs = wordIndexes && wordIndexes.length === groupWordsArr.length
+        ? wordIndexes
+        : groupWordsArr.map(() => -1);
+    const valid = idxs.map((ix, i) => ({ ix, i })).filter(o => o.ix >= 0);
+    if (!valid.length) return { lo: 0, hi: 0 };
+
+    const from = Math.min(...valid.map(o => o.ix));
+    const to = Math.max(...valid.map(o => o.ix));
+    const { prevEnd, nextStart } = liveNeighborBounds(allWords, from, to);
+
+    if (gesture.kind === 'group-move') {
+        // Every word must stay in [prevEnd-side, nextStart-side] and inside
+        // [0, dur] — the tightest word in the group wins.
+        let lo = -Infinity, hi = Infinity;
+        for (const { i } of valid) {
+            const word = allWords[idxs[i]];
+            lo = Math.max(lo, -word.start, prevEnd - word.start);
+            hi = Math.min(hi, dur - word.end, nextStart - word.end);
+        }
+        return { lo: Number.isFinite(lo) ? lo : 0, hi: Number.isFinite(hi) ? hi : 0 };
+    }
+    // group-resize: only one word's one edge moves.
+    if (gesture.edge === 'start') {
+        const firstIdx = valid.reduce((a, b) => (a.ix < b.ix ? a : b)).ix;
+        const word = allWords[firstIdx];
+        return {
+            lo: Math.max(0, prevEnd) - word.start,
+            hi: word.end - word.start,
+        };
+    }
+    const lastIdx = valid.reduce((a, b) => (a.ix > b.ix ? a : b)).ix;
+    const word = allWords[lastIdx];
+    return {
+        lo: word.start - word.end,
+        hi: Math.min(dur, nextStart) - word.end,
+    };
+}
+
+/** Apply `{ lo, hi }` to a raw delta (pins to hi when bounds are inverted). */
+export function clampDelta(delta, { lo, hi }) {
+    return Math.min(Math.max(delta, lo), hi);
+}
+
+/**
+ * Per-word display sub-boxes for the words of one group (drawn and
+ * hit-tested when pps ≥ WORD_SUB_PPS). Same MIN_BOX_PX display rule as
+ * group boxes; stored word times are never touched.
+ */
+export function wordBoxes(vp, words) {
+    if (!words || !words.length) return [];
+    return words.map((word, i) => {
+        const r = boxRect(vp, word.start, word.end);
+        return { i, word, x: r.x, w: r.w, degenerate: r.degenerate };
+    });
 }
