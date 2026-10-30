@@ -461,6 +461,64 @@ export function clampDelta(delta, { lo, hi }) {
 }
 
 /**
+ * Proposed times for a gesture delta — the ghost's single source of truth
+ * (Phase 4b). PURE: nothing is written to `words`; the App's commit funnel
+ * (Phase 4d) applies the same rule to the same indices, so the ghost always
+ * shows exactly what the commit will produce.
+ *
+ * Returns a Map of transcript word index → `{ start, end }` for every word
+ * the gesture touches (all group words on group-move, one word otherwise).
+ * The delta is clamped here (same bounds as the commit) so a ghost can never
+ * show an impossible position. Empty Map for gestures with no valid target.
+ */
+export function applyGestureDelta(gesture, allWords, wordIndexes, deltaSec) {
+    const out = new Map();
+    const idxs = Array.isArray(wordIndexes) ? wordIndexes : [];
+    const valid = [];
+    idxs.forEach((ix, i) => {
+        if (Number.isInteger(ix) && ix >= 0 && ix < allWords.length) valid.push({ ix, i });
+    });
+    if (!valid.length) return out;
+
+    const set = (ix, start, end) => out.set(ix, { start, end });
+
+    if (gesture.kind === 'word-move') {
+        const word = allWords[gesture.wordIndex];
+        if (word) set(gesture.wordIndex, word.start + deltaSec, word.end + deltaSec);
+        return out;
+    }
+    if (gesture.kind === 'word-resize') {
+        const word = allWords[gesture.wordIndex];
+        if (!word) return out;
+        if (gesture.edge === 'start') set(gesture.wordIndex, word.start + deltaSec, word.end);
+        else set(gesture.wordIndex, word.start, word.end + deltaSec);
+        return out;
+    }
+
+    // Group gestures operate on the valid transcript indices directly.
+    if (gesture.kind === 'group-move') {
+        for (const { ix } of valid) {
+            const word = allWords[ix];
+            set(ix, word.start + deltaSec, word.end + deltaSec);
+        }
+        return out;
+    }
+    if (gesture.kind === 'group-resize') {
+        if (gesture.edge === 'start') {
+            const { ix } = valid.reduce((a, b) => (a.ix < b.ix ? a : b));
+            const word = allWords[ix];
+            set(ix, word.start + deltaSec, word.end);
+        } else {
+            const { ix } = valid.reduce((a, b) => (a.ix > b.ix ? a : b));
+            const word = allWords[ix];
+            set(ix, word.start, word.end + deltaSec);
+        }
+        return out;
+    }
+    return out;
+}
+
+/**
  * Per-word display sub-boxes for the words of one group (drawn and
  * hit-tested when pps ≥ WORD_SUB_PPS). Same MIN_BOX_PX display rule as
  * group boxes; stored word times are never touched.

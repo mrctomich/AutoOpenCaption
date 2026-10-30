@@ -18,13 +18,22 @@
  *   click caption box    → select first word (NO seek)
  *   dbl-click box / Enter→ seek to group start
  *   drag box / drag empty lane → pan (scrub once released off a box)
+ *   hover box body/edge  → move / ew-resize cursor (Phase 4b)
+ *   word sub-boxes       → per-word outlines inside caption boxes at
+ *                          pps ≥ WORD_SUB_PPS (Phase 4b, display only)
+ *   drag ghost           → beginGhost/moveGhost/cancelGhost render the
+ *                          clamped proposed edit WITHOUT touching data
+ *                          (Phase 4b; the pointer FSM drives it in Phase 4c,
+ *                          the App commits through the same model fns in 4d)
  * Dock height + collapsed state persist to localStorage (Q2 decision).
  */
 
 import {
     createViewport, zoomAtAnchor, panByPixels, fitViewport, scrollToTime,
     timeToX, xToTime, pickRulerStep, rulerTicks, formatRulerTime,
-    groupBoxes, packLanes, hitTestBoxes, frameSpan, MIN_BOX_PX,
+    groupBoxes, packLanes, hitTestBoxes, frameSpan, MIN_BOX_PX, boxRect,
+    grabZone, editBounds, editBoundsForGroup, clampDelta,
+    wordBoxes, WORD_SUB_PPS, applyGestureDelta,
 } from './timeline-model.js';
 import { columnsFromPeaks } from './waveform.js';
 
@@ -49,14 +58,17 @@ export class TimelineView {
      * @param canvas     #timeline-canvas element
      * @param onSeek     (timeSec) => void — user-initiated seek (ruler click, scrub)
      * @param getGroups  () => CaptionGroup[] — live caption groups (App.captionGroups)
+     * @param getAllWords () => Word[] — live transcript word array (Phase 4:
+     *                   word sub-boxes, gesture bounds, ghost proposals)
      * @param onSelectGroup ({ groupIndex, word, seek, toggle }) => void — box click
      */
-    constructor(container, canvas, { onSeek = () => {}, getGroups = () => [], onSelectGroup = () => {} } = {}) {
+    constructor(container, canvas, { onSeek = () => {}, getGroups = () => [], getAllWords = () => [], onSelectGroup = () => {} } = {}) {
         this.container = container;
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
         this.onSeek = onSeek;
         this.getGroups = getGroups;
+        this.getAllWords = getAllWords;
         this.onSelectGroup = onSelectGroup;
 
         this.viewport = createViewport({ durationSec: 0, viewWidthPx: 0 });
@@ -72,6 +84,12 @@ export class TimelineView {
         this._laneBoxes = [];
         this._laneOf = [];
         this._laneTop = 0;
+
+        // In-flight drag ghost (Phase 4b): { gesture, bounds, delta, lane }.
+        // Rendering state ONLY — no timestamps live here; the proposal is
+        // recomputed from live word data every frame.
+        this._ghost = null;
+        this._dragging = false; // suppresses hover-cursor while a drag is active
 
         this.colors = null;
         this._readColors();
@@ -149,6 +167,76 @@ export class TimelineView {
     /** Keep `t` on screen (auto-follow hook; no seek). */
     followTime(t) {
         this.viewport = scrollToTime(this.viewport, t);
+        this.invalidate();
+    }
+
+    // ── Drag ghost (Phase 4b) ───────────────────────────────────
+    // Rendering-only preview of an in-flight timing gesture. The pointer FSM
+    // (Phase 4c) drives begin/move/cancel; the App commits through the same
+    // model functions, so the ghost always equals the commit. NO word data is
+    // ever touched here (gesture protocol: pointerdown → ghost, pointerup →
+    // saveState + commit, no per-move writes).
+
+    /** @returns {boolean} true when a grabbable ghost was started. */
+    beginGhost(gesture, groupIndex = -1) {
+        const allWords = this.getAllWords() || [];
+        const box = this._laneBoxes.find(b => b.index === groupIndex);
+        const wordIndexes = gesture.kind.startsWith('group-')
+            ? (box && box.wordIndex) || []
+            : [gesture.wordIndex];
+        const bounds = gesture.kind === 'group-move' || gesture.kind === 'group-resize'
+            ? editBoundsForGroup(gesture, allWords,
+                                 (box && box.group && box.group.words) || [],
+                                 wordIndexes, this.viewport.durationSec)
+            : editBounds(gesture, allWords, this.viewport.durationSec);
+        // Inverted bounds (already-invalid stored data) are fine here:
+        // clampDelta pins to `hi`, so the ghost simply cannot make it worse.
+        const involved = [...applyGestureDelta(gesture, allWords, wordIndexes, 0).keys()];
+        if (!involved.length) return false;
+        this._ghost = {
+            gesture, groupIndex, wordIndexes, bounds,
+            involved,
+            // Ghost rides the grabbed box's lane; word gestures fall back to
+            // their group's lane (wordIndex → box lookup below).
+            lane: (() => {
+                const b = box || this._laneBoxes.find(
+                    lb => lb.wordIndex && lb.wordIndex.includes(gesture.wordIndex));
+                return b ? (this._laneOf[b.index] || 0) : 0;
+            })(),
+            delta: 0,
+            proposal: applyGestureDelta(gesture, allWords, wordIndexes, 0),
+        };
+        this.invalidate();
+        return true;
+    }
+
+    /** Update with a RAW pixel delta (px right = later); clamps to bounds. */
+    moveGhost(dxPx) {
+        if (!this._ghost) return null;
+        const raw = dxPx / (this.viewport.pps || 1);
+        const delta = clampDelta(raw, this._ghost.bounds);
+        if (delta === this._ghost.delta) return delta;
+        this._ghost.delta = delta;
+        // Recompute from LIVE word data (never from a cached snapshot): the
+        // funnel only commits on release, so words cannot move mid-drag, but
+        // this keeps the proposal honest under any future re-entrancy.
+        this._ghost.proposal = applyGestureDelta(
+            this._ghost.gesture, this.getAllWords() || [], this._ghost.wordIndexes, delta);
+        this.invalidate();
+        return delta;
+    }
+
+    /** Final clamped delta (what a commit would apply), then clear the ghost. */
+    endGhost() {
+        const g = this._ghost;
+        this._ghost = null;
+        this.invalidate();
+        return g ? g.delta : null;
+    }
+
+    /** Abort without committing. */
+    cancelGhost() {
+        this._ghost = null;
         this.invalidate();
     }
 
@@ -279,7 +367,8 @@ export class TimelineView {
      */
     _refreshLanes(h) {
         const groups = (this.getGroups() && this.getGroups()) || [];
-        this._laneBoxes = groupBoxes(this.viewport, groups);
+        // allWords enables the per-group wordIndex mapping (Phase 4 edits).
+        this._laneBoxes = groupBoxes(this.viewport, groups, this.getAllWords() || []);
         const { laneOf, laneCount } = packLanes(this._laneBoxes);
         this._laneOf = laneOf;
         // Cap the strip so the waveform keeps a usable minimum height;
@@ -328,7 +417,26 @@ export class TimelineView {
         });
 
         c.addEventListener('pointermove', (e) => {
-            if (!mode) return;
+            if (!mode) {
+                // Hover affordances (Phase 4b): caption-box edges show the
+                // resize cursor, box bodies the move cursor. Purely visual —
+                // the grab itself lands with the pointer FSM (Phase 4c).
+                if (this._dragging) return;
+                const r = c.getBoundingClientRect();
+                const hx = e.clientX - r.left, hy = e.clientY - r.top;
+                let cursor = '';
+                if (this.viewport.durationSec > 0 && hy >= this._laneTop) {
+                    this._refreshLanes(c.clientHeight);
+                    const ix = hitTestBoxes(this._laneBoxes, this._laneOf,
+                                            hx, hy, this._laneTop, LANE_H);
+                    if (ix != null) {
+                        const b = this._laneBoxes[ix];
+                        cursor = grabZone(hx - b.x, b.w) === 'body' ? 'move' : 'ew-resize';
+                    }
+                }
+                if (c.style.cursor !== cursor) c.style.cursor = cursor;
+                return;
+            }
             const dx = e.clientX - startX;
             const dy = e.clientY - startY;
             if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
@@ -456,6 +564,7 @@ export class TimelineView {
 
         this._drawWaveform(w, wfTop, wfH);
         this._drawLanes(w, this._laneTop, stripH);
+        this._drawGhost(w, this._laneTop);
         this._drawRuler(w);
         this._drawPlayhead(w, h);
     }
@@ -582,6 +691,40 @@ export class TimelineView {
             ctx.stroke();
             ctx.setLineDash([]);
 
+            // Word sub-boxes at high zoom (Phase 4b): per-word outlines so
+            // the user sees exactly which word an edit will grab. Display
+            // only — sub-boxes are visual; word-level grabbing lands with
+            // the pointer FSM (Phase 4c).
+            const words = b.group.words;
+            if (vp.pps >= WORD_SUB_PPS && words && words.length) {
+                const subs = wordBoxes(vp, words);
+                ctx.strokeStyle = selected ? this.colors.accent : this.colors.muted;
+                ctx.globalAlpha = 0.9;
+                for (const s of subs) {
+                    // Clamp sub-boxes into the parent box: the group `end`
+                    // carries the renderer's ≥0.1 s display clamp, so the
+                    // last word can extend past the visual box edge.
+                    const sx = Math.max(s.x, b.x);
+                    const sr = Math.min(s.x + s.w, b.x + b.w);
+                    if (sr - sx < 1) continue;
+                    this._roundRect(ctx, sx, y + 1.5, sr - sx, bh - 3, 2);
+                    ctx.stroke();
+                    if (sr - sx >= 24 && s.word.text) {
+                        ctx.save();
+                        this._roundRect(ctx, sx, y + 1.5, sr - sx, bh - 3, 2);
+                        ctx.clip();
+                        ctx.fillStyle = selected ? this.colors.text : this.colors.muted;
+                        ctx.font = '9px var(--font-sans, sans-serif)';
+                        ctx.textAlign = 'left';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(s.word.text, sx + 3, y + bh / 2, sr - sx - 5);
+                        ctx.restore();
+                    }
+                }
+                ctx.globalAlpha = 1;
+                continue; // word labels replace the group label at this zoom
+            }
+
             // Text label when the box is wide enough to fit ~3+ glyphs.
             if (b.w >= 28 && b.group.text) {
                 ctx.save();
@@ -594,6 +737,78 @@ export class TimelineView {
                 ctx.fillText(b.group.text, b.x + 5, y + bh / 2, b.w - 8);
                 ctx.restore();
             }
+        }
+    }
+
+    /**
+     * Draw the in-flight ghost (Phase 4b). Renders the CLAMPED proposal from
+     * applyGestureDelta — exactly what a commit at this pointer position would
+     * produce — as a solid accent box on the grabbed lane, with the original
+     * span shown dashed for reference. Pure rendering: reads _ghost only.
+     */
+    _drawGhost(w, top) {
+        const g = this._ghost;
+        if (!g) return;
+        const ctx = this.ctx, vp = this.viewport;
+        const y = top + g.lane * LANE_H + 3;
+        const bh = LANE_H - 6;
+
+        // Union span of the proposal + per-word proposed rects.
+        let uStart = Infinity, uEnd = -Infinity;
+        const rects = [];
+        for (const ix of g.involved) {
+            const p = g.proposal.get(ix);
+            if (!p) continue;
+            const r = boxRect(vp, p.start, p.end);
+            rects.push(r);
+            uStart = Math.min(uStart, p.start);
+            uEnd = Math.max(uEnd, p.end);
+        }
+        if (!rects.length || !(uEnd > uStart)) return;
+
+        const ux = boxRect(vp, uStart, uEnd);
+
+        // Original span, dashed muted — shows where the edit came from.
+        const box = this._laneBoxes.find(b => b.index === g.groupIndex);
+        if (box) {
+            ctx.strokeStyle = this.colors.muted;
+            ctx.globalAlpha = 0.6;
+            ctx.setLineDash([3, 3]);
+            this._roundRect(ctx, box.x, y, Math.max(box.w, MIN_BOX_PX), bh, 3);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.globalAlpha = 1;
+        }
+
+        // Proposed union: translucent accent fill + solid outline.
+        ctx.fillStyle = this.colors.accent;
+        ctx.globalAlpha = 0.35;
+        this._roundRect(ctx, ux.x, y, Math.max(ux.w, MIN_BOX_PX), bh, 3);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = this.colors.accent;
+        this._roundRect(ctx, ux.x, y, Math.max(ux.w, MIN_BOX_PX), bh, 3);
+        ctx.stroke();
+
+        // Per-word proposed sub-boxes at word-zoom (matches sub-box display).
+        if (vp.pps >= WORD_SUB_PPS && rects.length > 1) {
+            ctx.strokeStyle = this.colors.accent;
+            ctx.globalAlpha = 0.8;
+            for (const r of rects) {
+                this._roundRect(ctx, r.x, y + 1.5, Math.max(r.w, 1), bh - 3, 2);
+                ctx.stroke();
+            }
+            ctx.globalAlpha = 1;
+        }
+
+        // Delta readout so the user sees the actual shift while dragging.
+        if (Math.abs(g.delta) > 1e-6) {
+            const label = `${g.delta > 0 ? '+' : '−'}${Math.abs(g.delta).toFixed(2)}s`;
+            ctx.font = '10px var(--font-sans, sans-serif)';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'bottom';
+            ctx.fillStyle = this.colors.accent;
+            ctx.fillText(label, Math.min(Math.max(ux.x, 2), w - 40), y - 1);
         }
     }
 

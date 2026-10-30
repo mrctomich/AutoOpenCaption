@@ -814,6 +814,8 @@ const App = {
                 // Live caption groups — rebuilt by rebuildLayout() after every
                 // edit, so lane boxes always match exported cue boundaries.
                 getGroups: () => this.captionGroups || [],
+                // Live transcript word array (Phase 4: sub-boxes, ghost bounds).
+                getAllWords: () => (this.transcript && this.transcript.words) || [],
                 onSelectGroup: (sel) => this.onTimelineSelectGroup(sel),
             },
         );
