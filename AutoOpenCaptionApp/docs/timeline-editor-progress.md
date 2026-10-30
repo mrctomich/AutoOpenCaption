@@ -16,14 +16,14 @@ the next phase only starts when the user authorizes it in a fresh session.
 | 1 | Repository investigation & technical design | **DONE 2026-10-27** (this document) |
 | 2 | Timeline panel foundation: ruler, waveform, scroll, zoom, playhead | **DONE 2026-10-27** |
 | 3 | Caption boxes + selection sync + double-click seek | **DONE 2026-10-28** |
-| 4 | Direct caption timing edits (drag move, edge resize) | not started |
+| 4 | Direct caption timing edits (drag move, edge resize) | **IN PROGRESS** — split 4a–4f (see split below): 4a **DONE 2026-10-29** (b512f72), 4b **DONE 2026-10-29** (00fffb8 + QA), next = **4c pointer FSM** |
 | 5 | Create missing captions/words, undo/redo integration | not started |
 | 6 | Integration, regression testing, polish | not started |
 
 ## How to resume (fresh session)
 
-1. `cd AutoOpenCaptionApp && node --test tests/*.test.mjs` — must be **107 pass / 0 fail** before starting (baseline verified 2026-10-28 on this branch after Phase 3; was 63 at Phase 1, 89 after Phase 2).
-2. Read this file (architecture + design below) — do not re-explore the repo from scratch.
+1. `cd AutoOpenCaptionApp && node --test tests/*.test.mjs` — must be **147 pass / 0 fail** before starting (baseline verified 2026-10-29 after Phase 4b; was 107 after Phase 3, 134 after 4a).
+2. Read this file (architecture + design below) — do not re-explore the repo from scratch. **Phase 4 is split into 4a–4f (see split section); one sub-phase per session, then STOP.**
 3. Begin the next unchecked phase above. Finish its tests, append its record, STOP.
 4. Push note: plain `git push` hangs here (Git Credential Manager prompt with no TTY). Working command:
    `GIT_TERMINAL_PROMPT=0 git -c credential.helper= push "https://x-access-token:$(gh auth token)@github.com/mrctomich/AutoOpenCaption.git" feature/interactive-timeline-editor`
@@ -417,3 +417,104 @@ grouping).
 
 **Next phase starting point:** Phase 4 (direct timing edits: drag move, edge
 resize) per design. STOP here — one phase per session.
+
+
+---
+
+## Phase 4 split — smaller sub-phases (decided 2026-10-29)
+
+Phase 4 proved too large for one context window, so it is split; **one
+sub-phase per session, then STOP:**
+
+| Sub | Scope | Status |
+|---|---|---|
+| 4a | Pure gesture/clamp logic in `timeline-model.js` (no DOM) | **DONE** (b512f72) |
+| 4b | Ghost drag rendering + word sub-boxes + hover cursors (view only, no commits) | **DONE** (00fffb8 + QA this session) |
+| 4c | Pointer FSM: wire pointerdown/move/up on lanes to grab-zone + ghost (still no commits) | next |
+| 4d | App mutation funnel: `applyTimelineEdit` commit on release (saveState → mutate → refresh) | not started |
+| 4e | Browser QA of real drag gestures (mouse events end-to-end, undo restores) | not started |
+| 4f | Docs, final polish, push PR update | not started |
+
+---
+
+## Phase 4a — Pure gesture & clamp logic: COMPLETE (2026-10-29)
+
+**What was built** (`timeline-model.js`, headless-tested only — commit b512f72):
+
+- `grabZone(xInBox, boxW, edgePx=5)` → `'left' | 'right' | 'body'` (edge zones
+  only when the box is wide enough to have both edges + body).
+- `resolveGesture({ zone, wordIndexInGroup, wordIndex, groupIndex })` →
+  gesture object: `group-move` / `group-resize{edge}` / `word-move` /
+  `word-resize{edge}` — word grab only when word boxes are active.
+- `liveNeighborBounds(words, fromIx, toIx)` → tightest adjacent word edges;
+  `editBounds` (word gestures) and `editBoundsForGroup` (group gestures) →
+  `{ lo, hi }` clamp bounds: `start ≥ 0`, `end ≤ duration`, `start ≤ end`,
+  neighbour word edges; tightest word in a group wins for `group-move`.
+- `clampDelta(delta, { lo, hi })`.
+- `wordBoxes(vp, words)` + `WORD_SUB_PPS = 120` (Q3 resolved: sub-boxes at
+  ≥120 px/s); `groupBoxes` gained optional `allWords` arg → per-group
+  `wordIndex` mapping (group word i → transcript index, −1 if not found).
+- Bug fixed during development: `liveNeighborBounds` span-range guard made
+  the neighbour branches dead code (always ±Infinity → clamps never applied).
+
+**Tests:** `tests/timeline-edit-gestures.test.mjs` (new, 27 tests) →
+**134 pass, 0 fail**.
+
+---
+
+## Phase 4b — Ghost drag rendering, word sub-boxes, hover cursors: COMPLETE (2026-10-29)
+
+**What was built:**
+
+- `timeline-model.js`: `applyGestureDelta(gesture, allWords, wordIndexes,
+  deltaSec)` → `Map<transcriptIndex, {start,end}>` — the ghost's single
+  source of truth, PURE (never mutates `words`); same rule Phase 4d will use
+  to commit, so ghost == commit. Empty Map for invalid targets; clamped
+  bounds applied by the caller.
+- `timeline-view.js` ghost API (rendering state ONLY, no timestamps stored):
+  `beginGhost(gesture, groupIndex)` (resolves wordIndexes + edit bounds from
+  live data, picks the grabbed box's lane), `moveGhost(dxPx)` (px→s, clamps
+  via `clampDelta`, recomputes proposal from LIVE words every move),
+  `endGhost()` → final clamped delta + clear (NO commit — 4d wires that),
+  `cancelGhost()`.
+- `_drawGhost`: dashed muted outline at the ORIGINAL span, translucent accent
+  union at the PROPOSED span, per-word proposed sub-boxes at word zoom, plus
+  a delta readout; redrawn via the existing dirty-flag rAF loop.
+- Word sub-boxes display: at `pps ≥ WORD_SUB_PPS` each group box draws
+  per-word outlines (+ text when ≥24 px) clamped inside the parent box (the
+  group `end` carries the renderer's ≥0.1 s display clamp, so the last word
+  can extend past the visual edge — sub-boxes are clamped to match).
+- Hover cursors: box body → `move`, edges (`grabZone`) → `ew-resize`,
+  empty lane → none; suppressed while a drag is active (`_dragging`).
+- `app.js`: `getAllWords()` passed to the view (live `transcript.words`).
+
+**Files changed:** `app/assets/timeline-model.js`, `timeline-view.js`,
+`app.js` (modified); `tests/timeline-ghost.test.mjs` (new, 13 tests);
+`scripts/tl_phase4b_qa.cjs` (new QA harness). Code commit: 00fffb8.
+
+**Tests:** `node --test tests/*.test.mjs` → **147 pass, 0 fail** (134 + 13).
+
+**Browser verification (headless Chrome via playwright-core, 12 s clip,
+25/25 checks — `scripts/tl_phase4b_qa.cjs`):** sub-boxes OFF below threshold
+(1 distinct interior color @80 pps) vs ON above (outlines + text @200 pps);
+`wordIndex` mapping correct; hover cursors move/ew-resize/empty correct;
+ghost start/move/clamp/end/cancel lifecycle correct; proposal translates
+every group word, clamps at `start ≥ 0` and at the neighbour word edge;
+ghost pixels appear at the proposed spot and revert on end/cancel;
+**word data byte-identical after every ghost interaction** (no per-move
+writes, `endGhost` does not commit); no page errors.
+
+**QA pitfalls learned:** (1) QA scripts must run as `.cjs` from the scratch
+dir where `playwright-core` is installed (`NODE_PATH`), stdin `</dev/null`.
+(2) The timeline redraws via dirty-flag rAF — pixel assertions must sample
+AFTER a `waitForTimeout(≥250 ms)`, never in the same `evaluate` that
+triggered the change. (3) Interior-color thresholds must be calibrated with
+a probe run (stroke + AA cluster tightly at 4-bit quantization).
+
+**Known limitations:** ghost/sub-boxes are rendering-only — nothing is
+grab-or-committable by a real mouse until 4c (FSM) + 4d (funnel).
+
+**Next phase starting point:** Phase 4c — pointer FSM: lane pointerdown →
+`grabZone`/word-box hit → `resolveGesture` → `beginGhost`; move →
+`moveGhost`; up → hold delta for 4d (or stub commit); must coexist with the
+existing click/dbl-click/pan handlers without regressions. STOP after 4c.
