@@ -5,6 +5,7 @@ import { installResumableFetch, isFileCached } from './resumable-fetch.js';
 import { loadCtcAligner, alignCtcTranscript, CtcAlignerError, CTC_MODEL_ID } from './ctc-aligner.js';
 import { applyCtcResult, revertCtcResult, canCtcRealign } from './ctc-apply.js';
 import { TimelineView } from './timeline-view.js';
+import { commitProposal } from './timeline-model.js';
 import { createPeakBuilder } from './waveform.js';
 
 const waitForTransformers = () => new Promise((resolve) => {
@@ -817,8 +818,47 @@ const App = {
                 // Live transcript word array (Phase 4: sub-boxes, ghost bounds).
                 getAllWords: () => (this.transcript && this.transcript.words) || [],
                 onSelectGroup: (sel) => this.onTimelineSelectGroup(sel),
+                // Phase 4d: a completed drag commits through the funnel.
+                onGestureEnd: (info) => this.applyTimelineEdit(info),
             },
         );
+    },
+
+    /**
+     * Single mutation funnel for timeline gestures (Phase 4d). A released
+     * ghost reports its final clamped proposal (Map of word index →
+     * { start, end }); commitProposal() validates it PURE, and only a
+     * non-empty mutation list gets an undo save — exactly one saveState()
+     * per completed gesture, none for zero-delta or returned-to-origin
+     * drags. Writes touch ONLY start/end (+ the userAdjusted flag);
+     * orig/original/deleted/estimated/unplaced side fields are never
+     * modified (R2).
+     * Groups are derived from words, so a move can reflow them — accepted
+     * design consequence, surfaced as a status note when it happens (R3).
+     */
+    applyTimelineEdit({ proposal } = {}) {
+        if (!this.transcript) return false;
+        const words = this.transcript.words;
+        const mutations = commitProposal(words, proposal);
+        if (!mutations.length) return false;
+        const groupsBefore = this.captionGroups.length;
+        this.saveState();
+        for (const m of mutations) {
+            const word = words[m.index];
+            word.start = m.start;
+            word.end = m.end;
+            word.userAdjusted = true; // "addressed" outline agrees with the editor
+        }
+        this.rebuildLayout();            // also timeline.invalidate() (lanes)
+        this.renderTranscriptEditor();
+        this.renderTranscriptDisplay();
+        this.updateInspector();
+        this.updatePreview();
+        this.timeline?.invalidate();
+        if (this.captionGroups.length !== groupsBefore) {
+            Status.msg(`Timing change regrouped captions: ${groupsBefore} → ${this.captionGroups.length} groups.`);
+        }
+        return true;
     },
 
     /**

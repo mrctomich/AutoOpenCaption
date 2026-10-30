@@ -581,3 +581,68 @@ true`; never touch `orig*`/`original*`/`deleted`/`estimated*`) →
 `rebuildLayout()` → `renderTranscriptEditor()` → `renderTranscriptDisplay()`
 → `updatePreview()` → `timeline.invalidate()`. Status note when the edit
 changed the group count (R3). STOP after 4d.
+
+## Phase 4d — App mutation funnel: COMPLETE (2026-10-30)
+
+**Scope:** a completed timeline gesture now really commits. `bindTimeline`
+wires `onGestureEnd` → `App.applyTimelineEdit`; the drag pipeline of 4a–4c
+ends in a write to `transcript.words` behind exactly one undo save.
+
+**What was built:**
+- `commitProposal(words, proposal, eps?)` in `timeline-model.js` — the PURE
+  validation half: proposal `Map<index, {start,end}>` → list of
+  `{index, start, end}` mutations. Rejects out-of-range/non-integer indices,
+  non-finite times, `start < 0`, and NEW start>end inversions; an
+  already-inverted stored word stays inverted when moved (R6
+  rendered-as-stored). Entries equal to stored times (≤ eps) produce no
+  mutation — zero-delta and returned-to-origin drags come back empty, which
+  is what makes the funnel's no-op cheap and total.
+- `App.applyTimelineEdit({ proposal })` in `app.js` — the funnel: validate →
+  empty mutations ⇒ return false WITHOUT touching anything → otherwise
+  `saveState()` once → write ONLY `start`/`end` + `userAdjusted = true` →
+  `rebuildLayout()` (lanes + `timeline.invalidate()`) →
+  `renderTranscriptEditor()` → `renderTranscriptDisplay()` →
+  `updateInspector()` → `updatePreview()` → `timeline?.invalidate()`.
+  R3: when the derived `captionGroups` count changed, a status note reports
+  the reflow (`Timing change regrouped captions: N → M groups.`).
+- `onGestureEnd: (info) => this.applyTimelineEdit(info)` in `bindTimeline`.
+
+**Files changed:** `app/assets/timeline-model.js` (+`commitProposal`),
+`app/assets/app.js` (import, funnel, wiring),
+`tests/timeline-commit.test.mjs` (new, 15 tests: commit semantics, purity,
+zero-delta/eps no-ops, all rejection rules, inverted-store R6, plus
+source-level guards pinning the funnel contract — one `saveState()`, gated on
+non-empty mutations, writes only start/end/userAdjusted, downstream refresh
+calls, R3 note, `onGestureEnd` wiring),
+`scripts/tl_phase4d_qa.cjs` (new browser QA).
+
+**Tests:** `node --test tests/*.test.mjs` → **168 pass, 0 fail** (153 + 15).
+
+**Browser verification (headless Chrome via playwright-core, 12 s clip,
+20/20 checks — `scripts/tl_phase4d_qa.cjs`):** 4-group synthetic transcript
+with full `orig*`/`original*`/`estimated*` side fields; instrumentation
+wraps `App.applyTimelineEdit`/`App.saveState` WITHOUT replacing the hook (the
+real wiring runs). Zero press+release: no funnel call, no save, data
+identical. Word-move bravo −0.4 s: exactly one funnel call + one save, word
+lands 2.6..3.0 (duration preserved ≤1 ULP), `userAdjusted` set, every side
+field intact (R2), other words untouched. `App.undo()` restores the pre-edit
+snapshot. Drag-out-and-back-to-origin: no commit, no save. Far-left drag
+clamped to alpha end → bravo touches alpha → groups merge 4 → 3 with its own
+single save (R3). Second undo restores data AND derived group count. Ghost
+cleared, zero page errors.
+
+**QA pitfalls learned:** (1) the 4c harness replaced `tl.onGestureEnd` with
+a recorder — fine pre-4d, fatal for it (bypasses the funnel); 4d instead
+wraps `App.applyTimelineEdit`/`App.saveState` and counts calls, since the
+view's hook resolves `this.applyTimelineEdit` at event time. (2) `Status` is
+module-scoped, not on `window` — R3's note is asserted via the observable
+group-count change, not DOM text. (3) `tl_clip.mp4` had aged out of scratch;
+regenerated with ffmpeg (testsrc+sine, 12 s, h264/aac) — same recipe works.
+
+**Known limitations:** nothing commits per-preview-frame (only on release —
+by design); nudge/keyboard timing edits still not wired (later phases).
+
+**Next phase starting point:** Phase 4e — QA & edge cases: dense transcripts
+and long media in the committed state, rapid successive gestures (undo stack
+depth), drag during playback, resize/re-render after commit, RTL/long words,
+plus a full manual-feel pass with real ASR output. STOP after 4e.

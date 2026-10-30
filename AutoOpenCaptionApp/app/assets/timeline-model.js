@@ -546,3 +546,41 @@ export function hitTestWordBox(vp, words, xPx) {
     }
     return -1;
 }
+
+/**
+ * Validate a gesture proposal Map into word mutations (Phase 4d commit
+ * funnel). PURE: returns a list of `{ index, start, end }` changes and
+ * writes nothing — `App.applyTimelineEdit` applies the list to
+ * `transcript.words` once per completed gesture, behind a single
+ * `saveState()`, and sets `userAdjusted` on each touched word.
+ *
+ * Rules (progress doc R2/R6):
+ *  - Only valid indices with finite proposed times are accepted.
+ *  - `start >= 0` always. A NEW start>end inversion is never introduced;
+ *    a word already stored inverted keeps its inversion (invalid values
+ *    are rendered-as-stored, never silently "fixed").
+ *  - Entries equal to the stored times produce no mutation — a zero-delta
+ *    gesture or a drag returned to its origin makes the whole commit empty,
+ *    so the funnel no-ops and skips the undo save entirely.
+ *
+ * The output carries ONLY start/end: every other word field (`text`,
+ * `deleted`, `estimated*`, `orig*`, `original*`, `unplaced`, flags) is off
+ * limits to the commit funnel by design.
+ */
+export function commitProposal(words, proposal, eps = 1e-9) {
+    const mutations = [];
+    if (!words || !proposal || typeof proposal.forEach !== 'function') return mutations;
+    proposal.forEach((p, ix) => {
+        if (!Number.isInteger(ix) || ix < 0 || ix >= words.length) return;
+        const word = words[ix];
+        if (!word || !p) return;
+        const start = p.start, end = p.end;
+        if (!Number.isFinite(start) || !Number.isFinite(end)) return;
+        if (start < 0) return;
+        const wasValid = word.end >= word.start;         // stored sanity baseline
+        if (wasValid && end < start) return;             // never introduce inversion
+        if (Math.abs(word.start - start) <= eps && Math.abs(word.end - end) <= eps) return;
+        mutations.push({ index: ix, start, end });
+    });
+    return mutations;
+}
