@@ -646,3 +646,74 @@ by design); nudge/keyboard timing edits still not wired (later phases).
 and long media in the committed state, rapid successive gestures (undo stack
 depth), drag during playback, resize/re-render after commit, RTL/long words,
 plus a full manual-feel pass with real ASR output. STOP after 4e.
+
+## Phase 4e — QA & edge cases of the committed state: COMPLETE (2026-10-30)
+
+**Scope:** no new features — harden the 4d commit funnel against edge cases:
+rapid successive gestures, drag during playback, long media, resize after
+commit, dense transcripts, long/RTL words. All browser-verified; every
+scenario ends with undo unwinding to a byte-identical snapshot.
+
+**What was built:** `scripts/tl_phase4e_qa.cjs` (new; scaffold copied from
+`tl_phase4d_qa.cjs` — same non-bypassing instrumentation: wraps
+`App.applyTimelineEdit`/`App.saveState`, counts calls, times the funnel).
+Uses a NEW 60 s clip `tl_clip_60.mp4` (testsrc+sine, 60 s h264/aac, ffmpeg
+lavfi) so long-media clamping is exercised against real duration.
+
+**Browser verification (headless Chrome via playwright-core, 60 s clip,
+29/29 checks):**
+- **S1 rapid successive gestures:** three word-moves fired back-to-back →
+  exactly 3 funnel calls + 3 saves; `undo()`×3 unwinds LIFO (undo #1 restores
+  alpha while bravo stays moved); final snapshot byte-identical.
+- **S2 drag during playback:** muted `video.play()`, word-move committed
+  mid-stream → one call + one save, word lands 2.6..3.0, video NOT paused
+  and `currentTime` advanced through the funnel refresh; undo restores.
+- **S3 long media (60 s):** at pps 10 a far-right group drag pins `end ==
+  durationSec` (59.4..60.0), no overrun, one commit; undo restores.
+- **S4 resize after commit:** after a −0.4 s commit, `setViewportSize
+  1440×900 → 1000×700` → bravo box rebuilt at the same transform x (780 →
+  780, fitMode manual keeps pps) and the lane band repaints (9 distinct
+  colors, pixel probe); undo after resize restores.
+- **S5 dense transcript (30 words, 0.35 s pitch, 10 groups):** press derived
+  from the calibrated box transform lands on word 6's sub-box centre (never
+  an inter-word gap) → EXACTLY one word changes, and it equals
+  `__last.wordIndex`; funnel incl. full editor re-render 0.6 ms; group count
+  stable.
+- **S6 long word + RTL:** 'Supercalifragilisticexpialidocious' and 'مرحبا'
+  both get lane boxes; RTL word drag commits 2.6..3.0, text byte-identical
+  (no mangling), R2 side fields intact.
+- Final invariants: ghost cleared, zero page errors.
+
+**Contract learned (assertion was wrong, app was right):** on a dense track
+a −0.2 s word-move applies only −0.05 s — `editBounds` clamps word-move at
+`prevEnd` (live neighbor bounds), i.e. **word drags never overlap the
+neighbouring live word**; the clamped word pins flush to the neighbour's end
+with duration preserved. QA now asserts the clamped delta AND
+`newStart == prevEnd` instead of the raw pointer delta. This is the
+"A no-op can be the contract" pitfall in its clamp form: derive the expected
+delta from `editBounds`, never from raw px/pps.
+
+**QA pitfalls learned:** (1) word sub-boxes are NOT stored on the view
+(computed per-frame in `draw`) — to press one programmatically, calibrate
+the box transform from a known solo box (`p = box.x − (start−viewStart)·pps`)
+and press the word's time-centre; group-box centres fall into inter-word
+gaps → silent group gesture. (2) Right-clamp at media end is only testable
+with a clip long enough to overshoot in-viewport: 12 s clip can't; a 60 s
+clip at pps 10 drags +1150 px = +115 s → clean clamp at 60.0.
+
+**Files changed:** `scripts/tl_phase4e_qa.cjs` (new), this doc. No app code
+touched — zero app bugs found; the only fix was the S5 expectation.
+
+**Tests:** `node --test tests/*.test.mjs` → **168 pass, 0 fail** (unchanged;
+re-verified this session).
+
+**Known limitations:** the "manual-feel pass with real ASR output" is NOT
+done here — it needs a full whisper transcription run in the user's browser
+(644 MB model); synthetic transcripts cover the data shapes. Recommend the
+user dogfood one real video before merge. Nudge/keyboard edits still
+unwired (unchanged limitation).
+
+**Next phase starting point:** Phase 4f — wrap-up: final doc pass (phase
+index, architecture summary, limitations), push, and prepare the PR for
+review/merge per the repo rhythm. STOP after 4f — do NOT merge before the
+user's word.
