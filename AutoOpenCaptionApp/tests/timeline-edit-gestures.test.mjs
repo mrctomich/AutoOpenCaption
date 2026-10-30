@@ -8,7 +8,7 @@ import {
     createViewport, groupBoxes, boxRect, MIN_BOX_PX,
     grabZone, resolveGesture, liveNeighborBounds,
     editBounds, editBoundsForGroup, clampDelta, wordBoxes,
-    WORD_SUB_PPS,
+    hitTestWordBox, WORD_SUB_PPS,
 } from '../app/assets/timeline-model.js';
 
 // Word factory: transcript-array shape, live unless stated.
@@ -328,4 +328,62 @@ test('gesture flow: high-zoom word drag resolves, clamps, and lands inside bound
     words[1].end += dt;
     assert.ok(words[1].end <= words[2].start + 1e-12);
     assert.equal(words[1].start, 1.5); // other edge untouched
+});
+
+// ── hitTestWordBox (Phase 4c pointer FSM word grab) ───────────────
+
+test('hitTestWordBox: back-to-back words resolve to the word under x', () => {
+    const vp = createViewport({ durationSec: 12, viewWidthPx: 1000, pps: 200 });
+    const words = [w(1, 1, 1.5), w(2, 1.5, 2.2), w(3, 2.2, 3)];
+    // viewStart = 0 → x = t*200: word 1 spans 200..300.
+    assert.equal(hitTestWordBox(vp, words, 250), 0);
+    assert.equal(hitTestWordBox(vp, words, 350), 1);   // word 2: 300..440
+    assert.equal(hitTestWordBox(vp, words, 500), 2);   // word 3: 440..600
+});
+
+test('hitTestWordBox: shared boundary hits the FIRST word (deterministic)', () => {
+    const vp = createViewport({ durationSec: 12, viewWidthPx: 1000, pps: 200 });
+    const words = [w(1, 1, 1.5), w(2, 1.5, 2.2)];
+    assert.equal(hitTestWordBox(vp, words, 300), 0);   // word 1 right edge
+});
+
+test('hitTestWordBox: gaps and outside spans return -1', () => {
+    const vp = createViewport({ durationSec: 12, viewWidthPx: 1000, pps: 200 });
+    const words = [w(1, 1, 1.5), w(2, 2.5, 3)];
+    // Gap 1.5..2.5 → x 300..500; middle of the gap misses both words.
+    assert.equal(hitTestWordBox(vp, words, 400), -1);
+    assert.equal(hitTestWordBox(vp, words, 100), -1);  // before first word
+    assert.equal(hitTestWordBox(vp, words, 900), -1);  // after last word
+});
+
+test('hitTestWordBox: zero-length word keeps a MIN_BOX_PX grab target', () => {
+    const vp = createViewport({ durationSec: 12, viewWidthPx: 1000, pps: 200 });
+    const words = [w(1, 1, 1), w(2, 2, 3)];
+    // Degenerate word at t=1 → sliver of MIN_BOX_PX centered on x=200.
+    assert.equal(hitTestWordBox(vp, words, 200), 0);
+    assert.equal(hitTestWordBox(vp, words, 200 + MIN_BOX_PX / 2 - 0.5), 0);
+});
+
+test('hitTestWordBox: empty input returns -1', () => {
+    const vp = createViewport({ durationSec: 12, viewWidthPx: 1000, pps: 200 });
+    assert.equal(hitTestWordBox(vp, [], 50), -1);
+    assert.equal(hitTestWordBox(vp, null, 50), -1);
+});
+
+test('FSM word grab maps hit word → transcript index via groupBoxes.wordIndex', () => {
+    // Mirrors timeline-view.startGhostDrag: box hit → word hit → resolveGesture.
+    const vp = createViewport({ durationSec: 12, viewWidthPx: 1000, pps: 200 });
+    const words = [w(7, 0, 0.4), w(8, 1, 1.5), w(9, 1.5, 2.2), w(10, 2.2, 3)];
+    const group = { start: 1, end: 3, text: 'two three four', words: words.slice(1) };
+    const [box] = groupBoxes(vp, [group], words);
+    const downX = 350;                       // inside word 9 (x 300..440)
+    const i = hitTestWordBox(vp, group.words, downX);
+    assert.equal(i, 1);
+    const wordIndex = box.wordIndex[i];
+    assert.equal(wordIndex, 2);              // transcript position of word 9
+    const gesture = resolveGesture({
+        zone: grabZone(downX - box.x, box.w),
+        wordIndexInGroup: i, wordIndex, groupIndex: box.index,
+    });
+    assert.deepEqual(gesture, { kind: 'word-move', wordIndex: 2 });
 });

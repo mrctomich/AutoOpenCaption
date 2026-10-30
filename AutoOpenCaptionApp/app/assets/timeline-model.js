@@ -530,3 +530,19 @@ export function wordBoxes(vp, words) {
         return { i, word, x: r.x, w: r.w, degenerate: r.degenerate };
     });
 }
+
+/**
+ * Index of the word sub-box under xPx, or -1 (Phase 4c pointer FSM). Uses
+ * the same boxRect display rule as wordBoxes (degenerate words keep a
+ * MIN_BOX_PX grab target). Callers gate on the parent box hit first, so a
+ * last-word sliver extending past the group's visual edge is naturally
+ * clipped by that gate. First match wins (group words don't overlap).
+ */
+export function hitTestWordBox(vp, words, xPx) {
+    if (!words || !words.length) return -1;
+    for (let i = 0; i < words.length; i++) {
+        const r = boxRect(vp, words[i].start, words[i].end);
+        if (xPx >= r.x && xPx <= r.x + r.w) return i;
+    }
+    return -1;
+}

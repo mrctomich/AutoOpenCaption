@@ -16,13 +16,13 @@ the next phase only starts when the user authorizes it in a fresh session.
 | 1 | Repository investigation & technical design | **DONE 2026-10-27** (this document) |
 | 2 | Timeline panel foundation: ruler, waveform, scroll, zoom, playhead | **DONE 2026-10-27** |
 | 3 | Caption boxes + selection sync + double-click seek | **DONE 2026-10-28** |
-| 4 | Direct caption timing edits (drag move, edge resize) | **IN PROGRESS** — split 4a–4f (see split below): 4a **DONE 2026-10-29** (b512f72), 4b **DONE 2026-10-29** (00fffb8 + QA), next = **4c pointer FSM** |
+| 4 | Direct caption timing edits (drag move, edge resize) | **IN PROGRESS** — split 4a–4f (see split below): 4a **DONE 2026-10-29** (b512f72), 4b **DONE 2026-10-29** (00fffb8 + QA), 4c **DONE 2026-10-30** (+ QA 19/19), next = **4d App commit funnel** |
 | 5 | Create missing captions/words, undo/redo integration | not started |
 | 6 | Integration, regression testing, polish | not started |
 
 ## How to resume (fresh session)
 
-1. `cd AutoOpenCaptionApp && node --test tests/*.test.mjs` — must be **147 pass / 0 fail** before starting (baseline verified 2026-10-29 after Phase 4b; was 107 after Phase 3, 134 after 4a).
+1. `cd AutoOpenCaptionApp && node --test tests/*.test.mjs` — must be **153 pass / 0 fail** before starting (baseline verified 2026-10-30 after Phase 4c; was 107 after Phase 3, 134 after 4a, 147 after 4b).
 2. Read this file (architecture + design below) — do not re-explore the repo from scratch. **Phase 4 is split into 4a–4f (see split section); one sub-phase per session, then STOP.**
 3. Begin the next unchecked phase above. Finish its tests, append its record, STOP.
 4. Push note: plain `git push` hangs here (Git Credential Manager prompt with no TTY). Working command:
@@ -430,7 +430,7 @@ sub-phase per session, then STOP:**
 |---|---|---|
 | 4a | Pure gesture/clamp logic in `timeline-model.js` (no DOM) | **DONE** (b512f72) |
 | 4b | Ghost drag rendering + word sub-boxes + hover cursors (view only, no commits) | **DONE** (00fffb8 + QA this session) |
-| 4c | Pointer FSM: wire pointerdown/move/up on lanes to grab-zone + ghost (still no commits) | next |
+| 4c | Pointer FSM: wire pointerdown/move/up on lanes to grab-zone + ghost (still no commits) | **DONE** (this session + QA) |
 | 4d | App mutation funnel: `applyTimelineEdit` commit on release (saveState → mutate → refresh) | not started |
 | 4e | Browser QA of real drag gestures (mouse events end-to-end, undo restores) | not started |
 | 4f | Docs, final polish, push PR update | not started |
@@ -518,3 +518,66 @@ grab-or-committable by a real mouse until 4c (FSM) + 4d (funnel).
 `grabZone`/word-box hit → `resolveGesture` → `beginGhost`; move →
 `moveGhost`; up → hold delta for 4d (or stub commit); must coexist with the
 existing click/dbl-click/pan handlers without regressions. STOP after 4c.
+
+
+---
+
+## Phase 4c — Pointer FSM: COMPLETE (2026-10-30)
+
+**What was built:**
+
+- `timeline-model.js`: `hitTestWordBox(vp, words, xPx)` → index of the word
+  sub-box under the pointerdown x, or −1. Same `boxRect` display rule as
+  `wordBoxes` (degenerate words keep a `MIN_BOX_PX` grab target),
+  deterministic first-match at shared boundaries, −1 in gaps/outside.
+- `timeline-view.js` pointer FSM (the 4b ghost API finally driven by real
+  pointers): box press + 3 px drag threshold → `startGhostDrag` —
+  `grabZone(downX)` + word hit-test (only at `pps ≥ WORD_SUB_PPS`) →
+  `resolveGesture` → `beginGhost`; every move → `moveGhost(dxPx)`.
+  Release → `endGhostDrag` reports `{ gesture, wordIndexes, delta,
+  proposal }` through the new **`onGestureEnd`** constructor callback —
+  zero-delta releases report NOTHING (a 0 commit must not burn an undo
+  slot). Esc mid-drag cancels (no report, and the press does NOT fall
+  through to pan); `pointercancel` cancels likewise. A box press can never
+  pan: it either ghosts or, after Esc/an unresolvable grab, stays inert
+  until release. Ruler drag, empty-lane pan, wheel, click-select and
+  dbl-click-seek all unchanged.
+- Still NO commits (per split): `App` does not wire `onGestureEnd` yet —
+  default no-op. Phase 4d attaches `applyTimelineEdit`. Word data verified
+  byte-identical after every gesture.
+
+**Files changed:** `app/assets/timeline-model.js`, `timeline-view.js`
+(modified); `tests/timeline-edit-gestures.test.mjs` (+6 tests:
+`hitTestWordBox` boundary/gap/degenerate/empty + FSM word→transcript-index
+mapping through `groupBoxes.wordIndex`); `scripts/tl_phase4c_qa.cjs` (new).
+
+**Tests:** `node --test tests/*.test.mjs` → **153 pass, 0 fail** (147 + 6).
+
+**Browser verification (headless Chrome via playwright-core, 12 s clip,
+19/19 checks — `scripts/tl_phase4c_qa.cjs`):** group-move via word gap
+(delta 0.2 s at pps 300, mid-drag ghost active); word-move on a solo-word
+box (wordIndex 2); word-resize `end` via right-edge grab drilling through
+the group box; over-drag left pins delta at −1.0 s (start ≥ 0 clamp);
+Esc clears ghost, release reports nothing, view does NOT pan; single click
+selects without ghost/gesture; dbl-click still seeks (`seek: true`);
+empty-lane drag pans without ghost; word data byte-identical after every
+interaction; zero page errors.
+
+**QA pitfalls learned:** (1) native `ffmpeg`/`node` get NO git-bash path
+translation — a clip written to `/tmp/x` silently lands in `C:\tmp\x`;
+pass `SCRATCH`/`NODE_PATH` as `C:/...` native paths. (2) The QA clip
+`tl_clip.mp4` (12 s, 2026-10-28 build) persists in the Hermes scratch dir;
+`playwright-core` lives in `<scratch>/pw4c/node_modules` (reinstall there
+with npm if it ages out).
+
+**Known limitations:** nothing commits yet (4d); word-level grabbing only
+at `pps ≥ WORD_SUB_PPS` — below that every box grab is a group gesture
+(by design).
+
+**Next phase starting point:** Phase 4d — App mutation funnel: wire
+`onGestureEnd` → `App.applyTimelineEdit`: `saveState()` once → apply the
+proposal Map to `transcript.words` (only `start`/`end` + `userAdjusted =
+true`; never touch `orig*`/`original*`/`deleted`/`estimated*`) →
+`rebuildLayout()` → `renderTranscriptEditor()` → `renderTranscriptDisplay()`
+→ `updatePreview()` → `timeline.invalidate()`. Status note when the edit
+changed the group count (R3). STOP after 4d.

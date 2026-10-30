@@ -17,14 +17,16 @@
  *   drag waveform        → scrub (continuous seek)
  *   click caption box    → select first word (NO seek)
  *   dbl-click box / Enter→ seek to group start
- *   drag box / drag empty lane → pan (scrub once released off a box)
+ *   drag caption box     → timing ghost (Phase 4c FSM: grabZone + word hit
+ *                          → resolveGesture → beginGhost/moveGhost; release
+ *                          reports the final clamped delta via onGestureEnd
+ *                          — the App commits that in Phase 4d, no per-move
+ *                          writes and no commit here)
+ *   drag empty lane      → pan
  *   hover box body/edge  → move / ew-resize cursor (Phase 4b)
  *   word sub-boxes       → per-word outlines inside caption boxes at
- *                          pps ≥ WORD_SUB_PPS (Phase 4b, display only)
- *   drag ghost           → beginGhost/moveGhost/cancelGhost render the
- *                          clamped proposed edit WITHOUT touching data
- *                          (Phase 4b; the pointer FSM drives it in Phase 4c,
- *                          the App commits through the same model fns in 4d)
+ *                          pps ≥ WORD_SUB_PPS (Phase 4b; grabbable in 4c)
+ *   Esc while dragging   → cancel ghost (no delta reported)
  * Dock height + collapsed state persist to localStorage (Q2 decision).
  */
 
@@ -32,8 +34,8 @@ import {
     createViewport, zoomAtAnchor, panByPixels, fitViewport, scrollToTime,
     timeToX, xToTime, pickRulerStep, rulerTicks, formatRulerTime,
     groupBoxes, packLanes, hitTestBoxes, frameSpan, MIN_BOX_PX, boxRect,
-    grabZone, editBounds, editBoundsForGroup, clampDelta,
-    wordBoxes, WORD_SUB_PPS, applyGestureDelta,
+    grabZone, editBounds, editBoundsForGroup, clampDelta, resolveGesture,
+    wordBoxes, hitTestWordBox, WORD_SUB_PPS, applyGestureDelta,
 } from './timeline-model.js';
 import { columnsFromPeaks } from './waveform.js';
 
@@ -61,8 +63,11 @@ export class TimelineView {
      * @param getAllWords () => Word[] — live transcript word array (Phase 4:
      *                   word sub-boxes, gesture bounds, ghost proposals)
      * @param onSelectGroup ({ groupIndex, word, seek, toggle }) => void — box click
+     * @param onGestureEnd ({ gesture, wordIndexes, delta, proposal }) => void —
+     *                   fired on release of a ghost drag with a non-zero
+     *                   clamped delta (Phase 4c reports; Phase 4d commits)
      */
-    constructor(container, canvas, { onSeek = () => {}, getGroups = () => [], getAllWords = () => [], onSelectGroup = () => {} } = {}) {
+    constructor(container, canvas, { onSeek = () => {}, getGroups = () => [], getAllWords = () => [], onSelectGroup = () => {}, onGestureEnd = () => {} } = {}) {
         this.container = container;
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
@@ -70,6 +75,7 @@ export class TimelineView {
         this.getGroups = getGroups;
         this.getAllWords = getAllWords;
         this.onSelectGroup = onSelectGroup;
+        this.onGestureEnd = onGestureEnd;
 
         this.viewport = createViewport({ durationSec: 0, viewWidthPx: 0 });
         this.peaks = null;
@@ -385,9 +391,74 @@ export class TimelineView {
         let mode = null;     // 'ruler' | 'box' | 'lane-empty' | 'scrub'
         let startX = 0, startY = 0, startView = 0, moved = false;
         let hitIndex = null; // box index under pointerdown (lane band)
+        let downX = 0;       // pointerdown x in canvas coords (gesture origin)
+        let dragGhost = false; // box press became a ghost drag (Phase 4c)
+        let ghostBlocked = false; // ghost cancelled (Esc/no-gesture) this press
 
         const seekAt = (x) => this.onSeek(
             Math.min(Math.max(xToTime(this.viewport, x), 0), this.viewport.durationSec));
+
+        // Escape aborts an in-flight ghost (no delta reported to onGestureEnd).
+        const onEscape = (e) => {
+            if (e.key === 'Escape' && dragGhost) {
+                dragGhost = false;
+                ghostBlocked = true;
+                this._dragging = false;
+                this.cancelGhost();
+            }
+        };
+
+        /**
+         * Box press crossed the drag threshold: resolve the gesture from the
+         * pointerdown position (zone + word under cursor at word zoom) and
+         * start the ghost. False → caller falls back to pan.
+         */
+        const startGhostDrag = (dx) => {
+            const box = this._laneBoxes[hitIndex];
+            if (!box) return false;
+            const zone = grabZone(downX - box.x, box.w);
+            let wordIndexInGroup = null, wordIndex = -1;
+            if (this.viewport.pps >= WORD_SUB_PPS
+                && box.group.words && box.group.words.length) {
+                const i = hitTestWordBox(this.viewport, box.group.words, downX);
+                if (i >= 0) {
+                    wordIndexInGroup = i;
+                    wordIndex = (box.wordIndex && box.wordIndex[i] != null)
+                        ? box.wordIndex[i] : -1;
+                    if (wordIndex < 0) wordIndexInGroup = null; // unresolvable
+                }
+            }
+            const gesture = resolveGesture({
+                zone, wordIndexInGroup, wordIndex, groupIndex: box.index,
+            });
+            if (!gesture || !this.beginGhost(gesture, box.index)) return false;
+            dragGhost = true;
+            this._dragging = true;
+            document.addEventListener('keydown', onEscape);
+            this.moveGhost(dx);
+            return true;
+        };
+
+        /** Release a ghost drag: hand the final proposal out (4d commits). */
+        const endGhostDrag = (cancelled) => {
+            document.removeEventListener('keydown', onEscape);
+            if (!dragGhost) { this.cancelGhost(); return; }
+            dragGhost = false;
+            this._dragging = false;
+            const g = this._ghost;
+            if (g && !cancelled) {
+                const info = {
+                    gesture: g.gesture, wordIndexes: g.wordIndexes,
+                    delta: g.delta, proposal: g.proposal,
+                };
+                this.endGhost();
+                // Zero delta = the drag never proposed a change: report
+                // nothing (a commit of 0 would still burn an undo slot).
+                if (Math.abs(info.delta) > 1e-9) this.onGestureEnd(info);
+            } else {
+                this.cancelGhost();
+            }
+        };
 
         c.addEventListener('pointerdown', (e) => {
             if (this.viewport.durationSec <= 0) return;
@@ -400,6 +471,8 @@ export class TimelineView {
             startView = this.viewport.viewStartSec;
             moved = false;
             hitIndex = null;
+            ghostBlocked = false;
+            downX = x;
 
             if (y <= RULER_H) {
                 mode = 'ruler';
@@ -420,7 +493,7 @@ export class TimelineView {
             if (!mode) {
                 // Hover affordances (Phase 4b): caption-box edges show the
                 // resize cursor, box bodies the move cursor. Purely visual —
-                // the grab itself lands with the pointer FSM (Phase 4c).
+                // the grab resolves against the same zone on pointerdown.
                 if (this._dragging) return;
                 const r = c.getBoundingClientRect();
                 const hx = e.clientX - r.left, hy = e.clientY - r.top;
@@ -441,11 +514,19 @@ export class TimelineView {
             const dy = e.clientY - startY;
             if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
             if (!moved) return;
+            if (dragGhost) {
+                this.moveGhost(dx);
+                return;
+            }
             if (mode === 'scrub') {
                 const r = c.getBoundingClientRect();
                 seekAt(e.clientX - r.left);
+            } else if (mode === 'box') {
+                // Box press never pans: it either ghosts or (Esc-cancelled /
+                // unresolvable grab) does nothing until release.
+                if (!ghostBlocked && !startGhostDrag(dx)) ghostBlocked = true;
             } else {
-                // ruler drag, box drag, empty-lane drag → pan
+                // ruler drag, empty-lane drag → pan
                 this.viewport = { ...this.viewport, viewStartSec: startView };
                 this.viewport = panByPixels(this.viewport, dx);
                 this.invalidate();
@@ -456,7 +537,10 @@ export class TimelineView {
             if (!mode) return;
             const r = c.getBoundingClientRect();
             const x = e.clientX - r.left;
-            if (!moved) {
+            if (dragGhost) {
+                // Release after a ghost drag: report, never click/select/seek.
+                endGhostDrag(false);
+            } else if (!moved) {
                 if (mode === 'ruler') {
                     seekAt(x);
                 } else if (mode === 'box') {
@@ -479,7 +563,10 @@ export class TimelineView {
             hitIndex = null;
         };
         c.addEventListener('pointerup', end);
-        c.addEventListener('pointercancel', () => { mode = null; hitIndex = null; });
+        c.addEventListener('pointercancel', () => {
+            endGhostDrag(true);
+            mode = null; hitIndex = null;
+        });
 
         // Double-click a caption box → seek to the group start (existing
         // selectWord seek semantics, applied by the App callback).
@@ -692,9 +779,8 @@ export class TimelineView {
             ctx.setLineDash([]);
 
             // Word sub-boxes at high zoom (Phase 4b): per-word outlines so
-            // the user sees exactly which word an edit will grab. Display
-            // only — sub-boxes are visual; word-level grabbing lands with
-            // the pointer FSM (Phase 4c).
+            // the user sees exactly which word an edit will grab. Grabbable:
+            // the pointer FSM hit-tests these at pps ≥ WORD_SUB_PPS (4c).
             const words = b.group.words;
             if (vp.pps >= WORD_SUB_PPS && words && words.length) {
                 const subs = wordBoxes(vp, words);
