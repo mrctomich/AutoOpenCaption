@@ -16,14 +16,14 @@ the next phase only starts when the user authorizes it in a fresh session.
 | 1 | Repository investigation & technical design | **DONE 2026-10-27** (this document) |
 | 2 | Timeline panel foundation: ruler, waveform, scroll, zoom, playhead | **DONE 2026-10-27** |
 | 3 | Caption boxes + selection sync + double-click seek | **DONE 2026-10-28** |
-| 4 | Direct caption timing edits (drag move, edge resize) | **IN PROGRESS** — split 4a–4f (see split below): 4a **DONE 2026-10-29** (b512f72), 4b **DONE 2026-10-29** (00fffb8 + QA), 4c **DONE 2026-10-30** (+ QA 19/19), next = **4d App commit funnel** |
-| 5 | Create missing captions/words, undo/redo integration | not started |
+| 4 | Direct caption timing edits (drag move, edge resize) | **DONE 2026-10-30** — split 4a–4f all complete: 4a b512f72, 4b 00fffb8 (+QA 25/25), 4c 3c8e740 (+QA 19/19), 4d 0663881 (+QA 20/20), 4e 45decb2 (+QA 29/29), 4f (this record: export-reflection QA 9/9, docs, PR) |
+| 5 | Create missing captions/words, undo/redo integration | not started — **next phase** |
 | 6 | Integration, regression testing, polish | not started |
 
 ## How to resume (fresh session)
 
-1. `cd AutoOpenCaptionApp && node --test tests/*.test.mjs` — must be **153 pass / 0 fail** before starting (baseline verified 2026-10-30 after Phase 4c; was 107 after Phase 3, 134 after 4a, 147 after 4b).
-2. Read this file (architecture + design below) — do not re-explore the repo from scratch. **Phase 4 is split into 4a–4f (see split section); one sub-phase per session, then STOP.**
+1. `cd AutoOpenCaptionApp && node --test tests/*.test.mjs` — must be **168 pass / 0 fail** before starting (baseline verified 2026-10-30 after Phase 4f; was 153 after 4c, 168 since 4d).
+2. Read this file (architecture + design below) — do not re-explore the repo from scratch. **Phase 4 (4a–4f) is COMPLETE** — see "Phase 4 complete — as-built architecture" for the shipped state. Next is **Phase 5** (create captions/words + undo/redo integration); if it looks heavy for one context window, split it 4a–4f-style (one sub-phase per session, record + STOP) rather than risking a mid-phase cutoff.
 3. Begin the next unchecked phase above. Finish its tests, append its record, STOP.
 4. Push note: plain `git push` hangs here (Git Credential Manager prompt with no TTY). Working command:
    `GIT_TERMINAL_PROMPT=0 git -c credential.helper= push "https://x-access-token:$(gh auth token)@github.com/mrctomich/AutoOpenCaption.git" feature/interactive-timeline-editor`
@@ -241,12 +241,18 @@ playhead but never seeks — one writer per direction, loop-safe.
 - **Q1 (Phase 2):** transcript without `_audioCache` (restored session) — offer
   a "decode audio for waveform" button (ffmpeg only, no transcription) or ship
   lanes-only? Default proposal: lanes-only for now, revisit in Phase 2 review.
+  → **RESOLVED (Phase 2): lanes-only shipped** (ruler + empty band, no error).
+  A decode-only button remains a possible later enhancement.
 - **Q2 (Phase 2):** timeline default height / collapsed state persisted to
   localStorage (like theme)? Proposal: yes, localStorage.
+  → **RESOLVED (Phase 2): persisted** (dock height + collapsed, localStorage).
 - **Q3 (Phase 4):** word-level drag pps threshold (proposal: show word
   sub-boxes when ≥ ~120 px/s).
+  → **RESOLVED (4a): `WORD_SUB_PPS = 120`** — sub-boxes drawn, hit-tested
+  and grabbable at ≥120 px/s; below that every box grab is a group gesture.
 - **Q4 (Phase 5):** add-caption UX — dbl-click empty lane space vs. explicit
-  "Add caption at playhead" button. Proposal: both.
+  "Add caption at playhead" button. Proposal: both. **OPEN — answer at
+  Phase 5 start.**
 
 ---
 
@@ -428,12 +434,12 @@ sub-phase per session, then STOP:**
 
 | Sub | Scope | Status |
 |---|---|---|
-| 4a | Pure gesture/clamp logic in `timeline-model.js` (no DOM) | **DONE** (b512f72) |
-| 4b | Ghost drag rendering + word sub-boxes + hover cursors (view only, no commits) | **DONE** (00fffb8 + QA this session) |
-| 4c | Pointer FSM: wire pointerdown/move/up on lanes to grab-zone + ghost (still no commits) | **DONE** (this session + QA) |
-| 4d | App mutation funnel: `applyTimelineEdit` commit on release (saveState → mutate → refresh) | not started |
-| 4e | Browser QA of real drag gestures (mouse events end-to-end, undo restores) | not started |
-| 4f | Docs, final polish, push PR update | not started |
+| 4a | Pure gesture/clamp logic in `timeline-model.js` (no DOM) | **DONE 2026-10-29** (b512f72) |
+| 4b | Ghost drag rendering + word sub-boxes + hover cursors (view only, no commits) | **DONE 2026-10-29** (00fffb8 + QA 25/25) |
+| 4c | Pointer FSM: wire pointerdown/move/up on lanes to grab-zone + ghost (still no commits) | **DONE 2026-10-30** (3c8e740 + QA 19/19) |
+| 4d | App mutation funnel: `applyTimelineEdit` commit on release (saveState → mutate → refresh) | **DONE 2026-10-30** (0663881 + QA 20/20) |
+| 4e | Browser QA of real drag gestures (mouse events end-to-end, undo restores) | **DONE 2026-10-30** (45decb2 + QA 29/29) |
+| 4f | Docs, final polish, push PR update | **DONE 2026-10-30** (this record; export-reflection QA 9/9) |
 
 ---
 
@@ -717,3 +723,105 @@ unwired (unchanged limitation).
 index, architecture summary, limitations), push, and prepare the PR for
 review/merge per the repo rhythm. STOP after 4f — do NOT merge before the
 user's word.
+
+## Phase 4 complete — as-built architecture (2026-10-30)
+
+The shipped timeline editor, as built across Phases 2–4 (this is the
+authoritative snapshot for future phases; the design section above is the
+pre-build intent — where they differ, this wins):
+
+**Modules** (`app/assets/`, zero runtime deps):
+
+- `timeline-model.js` — PURE, headless-tested. `Viewport`
+  (`durationSec, viewWidthPx, viewStartSec, pps`) with `timeToX`/`xToTime`
+  (float seconds authoritative; pixels never persisted), `clampViewport`
+  (`pps ∈ [viewWidth/duration, 600]`), `zoomAtAnchor`, `panByPixels`,
+  `scrollToTime`, ruler step ladder; `groupBoxes` (+`wordIndex` mapping),
+  `packLanes`, `hitTestBoxes`, `frameSpan`; word level: `wordBoxes`
+  (`WORD_SUB_PPS = 120`), `hitTestWordBox`; gestures: `grabZone` (edges
+  5 px), `resolveGesture` → `group-move | group-resize{edge} | word-move |
+  word-resize{edge}`, `liveNeighborBounds`/`editBounds`/`editBoundsForGroup`
+  (`start ≥ 0`, `end ≤ duration`, `start ≤ end`, neighbour edges),
+  `clampDelta`, `applyGestureDelta` (ghost proposal `Map<index,
+  {start,end}>`, pure — same rule the commit uses, so ghost == commit),
+  `commitProposal` (validate → mutation list; rejects bad indices,
+  non-finite, `start < 0`, NEW start>end inversions; ≤eps no-ops;
+  already-inverted stores stay inverted, R6).
+- `waveform.js` — PURE: 512-sample min/max buckets (`createPeakBuilder`,
+  incremental `feed`/`snapshot`), `columnsForRange` per-pixel aggregation at
+  any zoom; built in 5 s slices after transcription.
+- `timeline-view.js` — DOM/canvas glue: DPR-aware `#timeline-dock` canvas
+  (ruler / waveform / caption lanes), pointer FSM (box press +3 px → ghost
+  drag; ruler click seek / drag pan; empty-lane pan; wheel scroll,
+  ctrl+wheel zoom; click select, dbl-click seek; Esc/pointercancel abort
+  without pan fallthrough; zero-delta release reports nothing),
+  `onGestureEnd({ gesture, wordIndexes, delta, proposal })` callback,
+  `setSelectedWord` reverse sync, localStorage height/collapse.
+- `app.js` — `bindTimeline()` wires the view to `App`; **single mutation
+  funnel** `App.applyTimelineEdit({ proposal })`: validate via
+  `commitProposal` → empty ⇒ return false untouched → else exactly one
+  `saveState()` → write ONLY `start`/`end` + `userAdjusted = true` (never
+  `orig*`/`original*`/`deleted`/`estimated*` → CTC protection via drift, R2)
+  → `rebuildLayout()` → editor/display/inspector/preview refresh →
+  `timeline.invalidate()`; R3 status note when group count changes. The
+  timeline stores NO timestamps of its own — every render re-reads
+  `App.captionGroups` / `transcript.words`.
+
+**Invariants proven headless (168 tests) + browser QA (93 checks across
+4b–4f):** one undo slot per committed gesture (LIFO verified); ghost ==
+committed result; moves preserve duration ≤1 ULP; word drags never overlap
+the neighbour live word (`editBounds` pins flush at `prevEnd`); side fields
+byte-identical (R2); zero-delta/return-to-origin never burns undo; SRT/VTT
+re-export reflects edits and undo (4f QA); playback keeps running through a
+commit; 60 s end-clamp exact; dense-track one-word-per-gesture.
+
+### Consolidated limitations (state of Phase 4)
+
+1. Waveform requires `_audioCache` (present after transcription); restored
+   sessions show lanes-only (Q1) — decode-only button not built.
+2. Word-level grabbing only at `pps ≥ 120`; below it every grab is a group
+   gesture (by design, Q3).
+3. Nudge/keyboard timing edits not wired to the funnel (pre-existing
+   inspector gap, incl. `nudgeTime`'s missing `saveState`).
+4. Group reflow after moves is accepted behaviour (R3) — a frozen cue list
+   was rejected; reflow is status-noted and reflected in exports.
+5. CTC Revert after timeline edits restores the pre-realign snapshot
+   including timeline edits (R9 — correct semantics).
+6. Manual-feel pass with a real Whisper transcription (644 MB model, user's
+   browser) NOT yet done — synthetic transcripts cover data shapes;
+   dogfood one real video before merge recommended.
+7. Full burn-in/CTC/sanitize regression sweep is Phase 6 scope.
+
+## Phase 4f — Docs, export-reflection QA, push & PR-ready: COMPLETE (2026-10-30)
+
+**Scope:** final documentation pass, closing the one P4 acceptance item not
+yet end-to-end verified (SRT/VTT re-export reflects edits), push, PR update.
+No app code changed.
+
+**What was built:**
+- `scripts/tl_phase4f_export_qa.cjs` (new) — export-reflection QA on the
+  real wiring (no instrumentation needed; `generateSRT`/`generateVTT` read
+  derived `captionGroups`): **9/9 PASS** — baseline 4 cues; committed
+  word-drag bravo −0.4 s appears as `00:00:02,600 --> 00:00:03,000` in SRT
+  (and dot-separator form in VTT) with all other cues unchanged; undo
+  restores the exported times; regroup drag yields 3 cues with merged text
+  `Alpha bravo.` spanning 1.0 → 1.8; zero page errors.
+- This doc: Phase/status tables closed out (4 DONE, 5 = next), resume
+  baseline 168, Q1/Q2/Q3 marked resolved with shipped values, as-built
+  architecture summary + consolidated limitations added above.
+
+**Tests:** `node --test tests/*.test.mjs` → **168 pass, 0 fail** (verified
+this session before doc edits).
+
+**Files changed:** `docs/timeline-editor-progress.md`,
+`scripts/tl_phase4f_export_qa.cjs` (new). Docs + script pushed to
+`feature/interactive-timeline-editor`; PR #13 retitled and body rewritten
+as the full Phase 1–4 review summary. **NOT merged — waiting on the
+user's word** (per rule; also 4e limitation: real-ASR dogfood pending).
+
+**Next phase starting point:** Phase 5 — create missing captions/words +
+undo/redo integration. Answer Q4 first (proposal: both dbl-click empty lane
+AND "add caption at playhead" button). New words take `max(id)+1`; create
+through the same funnel discipline (one `saveState()` per gesture). If the
+phase looks heavy for one context window, split it 4a–4f-style. STOP after
+Phase 5 (or each sub-phase if split).
