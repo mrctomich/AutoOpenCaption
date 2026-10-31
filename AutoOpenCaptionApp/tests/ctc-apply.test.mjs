@@ -294,3 +294,128 @@ test('helpers: isUserAdjustedTiming / invalidTimingReason edge cases', () => {
     assert.equal(invalidTimingReason({ start: 0, end: 12 }, 10), 'user-timing-out-of-range');
     assert.equal(invalidTimingReason({ start: 12, end: 13 }), null); // no duration ⇒ no range check
 });
+
+// ── MONOTONICITY GUARD (Phase 4 follow-up) ──────────────────────────
+// Realign output mixes fresh CTC spans with kept Whisper estimates, so a
+// CTC word can be stamped before the previous word ended. That created
+// overlapping caption groups (second packed timeline lane + overlapping
+// SRT cues). applyCtcResult now clamps CTC starts forward; untouchable
+// words (kept/user timings) are only counted, never moved.
+
+function seamWords() {
+    return [
+        { id: 'a', text: 'FIRST', start: 1.00, end: 3.00, origStart: 1.00, origEnd: 3.00 },
+        { id: 'b', text: 'SECOND', start: 2.50, end: 3.20, origStart: 2.50, origEnd: 3.20 },
+    ];
+}
+
+test('monotonicity: CTC word starting before previous word end is clamped to prevEnd', () => {
+    const words = seamWords();
+    const result = {
+        words: [
+            { id: 'a', text: 'FIRST', start: 1.00, end: 3.00, alignment: 'ctc' },
+            { id: 'b', text: 'SECOND', start: 2.50, end: 3.20, alignment: 'ctc' },
+        ],
+        unalignable: [],
+    };
+    const out = applyCtcResult(words, result);
+    assert.equal(out.monotonicClamped, 1);
+    assert.equal(out.backwardConflicts, 0);
+    assert.equal(words[1].start, 3.00);
+    assert.equal(words[1].end, 3.20);
+    // baseline re-anchored to the FINAL clamped timing, not the raw CTC span
+    assert.equal(words[1].origStart, 3.00);
+    assert.equal(words[1].origEnd, 3.20);
+});
+
+test('monotonicity: CTC span fully inside the previous word gets positive duration at prevEnd', () => {
+    const words = seamWords();
+    const result = {
+        words: [
+            { id: 'a', text: 'FIRST', start: 1.00, end: 3.00, alignment: 'ctc' },
+            { id: 'b', text: 'SECOND', start: 2.10, end: 2.40, alignment: 'ctc' },
+        ],
+        unalignable: [],
+    };
+    const out = applyCtcResult(words, result);
+    assert.equal(out.monotonicClamped, 1);
+    assert.equal(words[1].start, 3.00);
+    assert.ok(words[1].end > words[1].start);
+});
+
+test('monotonicity: kept estimate with a late end pushes the following CTC word forward', () => {
+    const words = seamWords();
+    const result = {
+        words: [
+            { id: 'a', text: 'FIRST', start: 1.00, end: 3.00, alignment: 'estimated' },
+            { id: 'b', text: 'SECOND', start: 2.50, end: 3.20, alignment: 'ctc' },
+        ],
+        unalignable: [{ index: 0, text: 'FIRST', reason: 'low-confidence', chars: [] }],
+    };
+    const out = applyCtcResult(words, result);
+    assert.equal(words[0].start, 1.00); // kept timing untouched
+    assert.equal(words[1].start, 3.00); // CTC clamped to the kept word end
+    assert.equal(out.monotonicClamped, 1);
+    assert.equal(out.backwardConflicts, 0);
+});
+
+test('monotonicity: backward jump from an untouchable word is reported, never repaired', () => {
+    const words = [
+        { id: 'a', text: 'FIRST', start: 5.00, end: 6.00, userAdjusted: true, origStart: 5.00, origEnd: 6.00 },
+        { id: 'b', text: 'SECOND', start: 2.00, end: 2.50, origStart: 2.00, origEnd: 2.50 },
+        { id: 'c', text: 'THIRD', start: 7.00, end: 7.50, origStart: 7.00, origEnd: 7.50 },
+    ];
+    const result = {
+        words: [
+            { id: 'a', text: 'FIRST', start: 5.00, end: 6.00, alignment: 'ctc' },   // user-guarded
+            { id: 'b', text: 'SECOND', start: 2.00, end: 2.50, alignment: 'estimated' }, // goes backwards
+            { id: 'c', text: 'THIRD', start: 6.80, end: 7.50, alignment: 'ctc' },
+        ],
+        unalignable: [{ index: 1, text: 'SECOND', reason: 'low-confidence', chars: [] }],
+    };
+    const out = applyCtcResult(words, result, { skipUserAdjusted: true });
+    assert.equal(words[0].start, 5.00);  // user-adjusted word untouched
+    assert.equal(words[1].start, 2.00);  // kept estimate untouched
+    assert.equal(out.backwardConflicts, 1); // the backward kept word is reported
+    // the later CTC word is still pushed past the running max end (6.00)
+    assert.equal(words[2].start, 6.80);  // already past 6.00, no clamp needed
+    assert.equal(out.monotonicClamped, 0);
+});
+
+test('monotonicity: healthy chronological transcript passes through with zero guard counts', () => {
+    const words = seamWords();
+    const result = {
+        words: [
+            { id: 'a', text: 'FIRST', start: 1.00, end: 2.00, alignment: 'ctc' },
+            { id: 'b', text: 'SECOND', start: 2.10, end: 3.20, alignment: 'ctc' },
+        ],
+        unalignable: [],
+    };
+    const out = applyCtcResult(words, result);
+    assert.equal(out.monotonicClamped, 0);
+    assert.equal(out.backwardConflicts, 0);
+    assert.equal(words[0].start, 1.00);
+    assert.equal(words[1].start, 2.10);
+});
+
+test('monotonicity: revert restores the exact pre-realign state when clamping occurred', () => {
+    const words = seamWords();
+    const before = JSON.parse(JSON.stringify(words));
+    const result = {
+        words: [
+            { id: 'a', text: 'FIRST', start: 1.00, end: 3.00, alignment: 'ctc' },
+            { id: 'b', text: 'SECOND', start: 2.50, end: 3.20, alignment: 'ctc' },
+        ],
+        unalignable: [],
+    };
+    const { snapshot } = applyCtcResult(words, result);
+    assert.equal(words[1].start, 3.00); // clamped
+    const n = revertCtcResult(words, snapshot);
+    assert.equal(n, 2);
+    for (let i = 0; i < words.length; i++) {
+        assert.equal(words[i].start, before[i].start);
+        assert.equal(words[i].end, before[i].end);
+        assert.equal(words[i].origStart, before[i].origStart);
+        assert.equal(words[i].origEnd, before[i].origEnd);
+    }
+});

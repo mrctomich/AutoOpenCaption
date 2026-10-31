@@ -24,6 +24,16 @@
  *  - applyCtcResult() returns a per-word snapshot (keyed by word id) that
  *    revertCtcResult() restores completely: start/end, the `estimated`
  *    red-flag, and the origStart/origEnd "adjusted" baseline.
+ *  - MONOTONICITY GUARD (Phase 4 follow-up): the aligner output mixes fresh
+ *    CTC spans with kept Whisper estimates, so the word stream can go
+ *    backwards in time at the seams (a CTC word stamped before the previous
+ *    word's end). That made caption groups overlap, which the timeline
+ *    surfaced as a second packed lane and which leaked into SRT/VTT export.
+ *    A forward pass now clamps every CTC word's start to the running max of
+ *    all previous word ends (end follows if needed) — words we are allowed
+ *    to move. Untouchable words (kept estimates, user-adjusted, flagged
+ *    invalid) are NEVER moved; a backward jump caused by one of those is
+ *    only counted (`backwardConflicts`) so the UI can report it.
  *  - Text is never touched. Words created after the realign (split/merge)
  *    are ignored by revert — they have no snapshot entry.
  */
@@ -92,7 +102,8 @@ export function invalidTimingReason(word, duration) {
  *        manually adjusted (see isUserAdjustedTiming). duration: seconds of
  *        decoded audio, enables the out-of-range validity check.
  * @returns {{snapshot: Array, aligned: number, kept: number, changed: number,
- *            skippedUserAdjusted: number, flaggedInvalid: number}}
+ *            skippedUserAdjusted: number, flaggedInvalid: number,
+ *            monotonicClamped: number, backwardConflicts: number}}
  * @throws if result.words does not line up 1:1 (length and id order) with words
  */
 export function applyCtcResult(words, result, options = {}) {
@@ -109,6 +120,10 @@ export function applyCtcResult(words, result, options = {}) {
 
     const snapshot = [];
     let aligned = 0, kept = 0, changed = 0, skippedUserAdjusted = 0, flaggedInvalid = 0;
+    let monotonicClamped = 0, backwardConflicts = 0;
+    // Running max of every processed word's end (finite values only). Used to
+    // keep CTC timings chronological; see MONOTONICITY GUARD in the header.
+    let prevEnd = -Infinity;
 
     words.forEach((w, i) => {
         const r = result.words[i];
@@ -135,26 +150,44 @@ export function applyCtcResult(words, result, options = {}) {
             if (invalid) flaggedInvalid++;
             kept++;
             skippedUserAdjusted++;
+            if (Number.isFinite(w.start) && w.start < prevEnd) backwardConflicts++;
+            if (Number.isFinite(w.end) && w.end > prevEnd) prevEnd = w.end;
         } else if (r.alignment === 'ctc') {
-            if (w.start !== r.start || w.end !== r.end) changed++;
-            w.start = r.start;
-            w.end = Math.max(r.end, r.start + 1e-6);
+            // Monotonicity guard: a CTC span that starts before any previous
+            // word ended would overlap it (caption groups would collide and
+            // SRT export would carry overlapping cues). Push the CTC start to
+            // prevEnd — only ever words we own, never kept/user timings.
+            let start = r.start;
+            let end = Math.max(r.end, r.start + 1e-6);
+            if (Number.isFinite(start) && start < prevEnd) {
+                start = prevEnd;
+                if (end < start) end = start + 1e-6;
+                monotonicClamped++;
+            }
+            if (w.start !== start || w.end !== end) changed++;
+            w.start = start;
+            w.end = end;
             w.estimated = false;          // timing now has audio evidence
             w.ctcAligned = true;
             delete w.ctcReason;
             w.origStart = w.start;        // don't show machine timing as user-adjusted
             w.origEnd = w.end;
             aligned++;
+            if (Number.isFinite(end) && end > prevEnd) prevEnd = end;
         } else {
             // "estimated"/"unalignable": keep the current app timing untouched,
             // record why the aligner had no evidence for this word.
             w.ctcAligned = false;
             w.ctcReason = reasonById.get(id) || 'no-ctc-evidence';
             kept++;
+            // Untouchable: a backward jump here is reported, never repaired.
+            if (Number.isFinite(w.start) && w.start < prevEnd) backwardConflicts++;
+            if (Number.isFinite(w.end) && w.end > prevEnd) prevEnd = w.end;
         }
     });
 
-    return { snapshot, aligned, kept, changed, skippedUserAdjusted, flaggedInvalid };
+    return { snapshot, aligned, kept, changed, skippedUserAdjusted, flaggedInvalid,
+             monotonicClamped, backwardConflicts };
 }
 
 /**

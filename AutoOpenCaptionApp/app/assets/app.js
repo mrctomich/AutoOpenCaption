@@ -1330,7 +1330,11 @@ const App = {
             let msg = `Realigned ${applied.aligned} of ${applied.aligned + applied.kept} word timings (experimental)`;
             if (skipped) msg += ` — ${skipped} kept their timing (no CTC evidence)`;
             if (applied.skippedUserAdjusted) msg += `, ${applied.skippedUserAdjusted} kept your manual timing`;
+            if (applied.monotonicClamped) msg += `, ${applied.monotonicClamped} shifted forward to keep word order`;
             Status.success(msg);
+            if (applied.backwardConflicts) {
+                Status.warning(`${applied.backwardConflicts} kept timing${applied.backwardConflicts === 1 ? '' : 's'} overlap neighbouring words — captions may still overlap there; check the flagged words in the inspector.`);
+            }
             if (applied.flaggedInvalid) {
                 Status.warning(`${applied.flaggedInvalid} manually adjusted word ${applied.flaggedInvalid === 1 ? 'timing looks' : 'timings look'} invalid (negative, reversed, or beyond the audio) — kept unchanged, please fix them in the inspector.`);
             }

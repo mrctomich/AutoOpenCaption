@@ -825,3 +825,47 @@ AND "add caption at playhead" button). New words take `max(id)+1`; create
 through the same funnel discipline (one `saveState()` per gesture). If the
 phase looks heavy for one context window, split it 4a–4f-style. STOP after
 Phase 5 (or each sub-phase if split).
+
+## Phase 4 follow-up — CTC realign monotonicity guard (2026-10-31)
+
+**Reported symptom (user dogfood):** after clicking "Realign timing", the
+timeline showed a SECOND caption lane with boxes overlapping the first row.
+
+**Root cause:** `alignCtcTranscript()` output mixes fresh wav2vec2 CTC spans
+with kept Whisper estimates (`no-ctc-evidence` / `low-confidence` /
+user-adjusted guard) and its only ordering guarantee
+(`cursor = Math.max(cursor, out.end)`) covers words with NO timestamp at
+all. At seams the word stream could go backwards in time. `applyCtcResult()`
+wrote spans word-by-word with no ordering check; `groupWords()`' overlap
+clamp intentionally skips the `next.start <= g.start` case, so the overlap
+survived into `captionGroups` — visible as a second packed lane
+(`packLanes` opens a lane per time-overlapping group) AND in SRT/VTT export
+(overlapping cues; `findGroupAtTime` lets the earlier caption win).
+
+**Fix (ctc-apply.js, `applyCtcResult`):** forward pass tracks `prevEnd` =
+running max of every processed word's end. A CTC word's start is clamped to
+`prevEnd` (end follows to keep positive duration) and counted in
+`monotonicClamped`. Untouchable words (kept estimates, user-adjusted,
+flagged-invalid) are NEVER moved — consistent with the Gap A guard; a
+backward jump caused by one of those is counted in `backwardConflicts`.
+`origStart/origEnd` re-anchor to the FINAL clamped timing. Snapshot is
+taken before any mutation, so `revertCtcResult` still restores exactly.
+
+**Reporting (app.js):** success status gains "N shifted forward to keep word
+order"; new warning when `backwardConflicts > 0` pointing at the inspector.
+
+**Tests:** +6 in `tests/ctc-apply.test.mjs` (clamp-to-prevEnd, fully-inside
+span gets positive duration at prevEnd, kept-estimate seam pushes following
+CTC word, untouchable backward jump reported-not-repaired, healthy input
+zero-counts, revert restores post-clamp state).
+`node --test tests/*.test.mjs` → **174 pass, 0 fail** (baseline 168 + 6).
+E2E sanity: clamped seam → `groupWords` emits zero overlapping group pairs
+→ `packLanes` single lane.
+
+**Files changed:** `app/assets/ctc-apply.js`, `app/assets/app.js`,
+`tests/ctc-apply.test.mjs`, `README.txt`, this doc. No timeline/grouping
+code touched — the second lane stays as the honest signal for overlaps
+that only untouchable words can cause (now warned about).
+
+**Next phase starting point:** unchanged — Phase 5 (create
+captions/words + undo/redo; answer Q4 first).
