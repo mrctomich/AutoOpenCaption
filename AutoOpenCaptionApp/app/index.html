@@ -380,6 +380,24 @@
         </div>
     </main>
 
+    <!-- Timeline Dock (full-width, above status bar) -->
+    <div id="timeline-dock" class="timeline-dock">
+        <div id="timeline-resizer" class="timeline-resizer" title="Drag to resize timeline"></div>
+        <div class="timeline-toolbar">
+            <span class="timeline-title">Timeline</span>
+            <span id="timeline-time" class="timeline-time">0:00.0</span>
+            <div class="timeline-toolbar-spacer"></div>
+            <button id="btn-tl-zoom-sel" class="btn-secondary btn-tl" title="Zoom to selection (or playhead)">Sel</button>
+            <button id="btn-tl-zoom-out" class="btn-secondary btn-tl" title="Zoom out">−</button>
+            <button id="btn-tl-zoom-in" class="btn-secondary btn-tl" title="Zoom in">+</button>
+            <button id="btn-tl-zoom-fit" class="btn-secondary btn-tl" title="Zoom to fit">Fit</button>
+            <button id="btn-tl-collapse" class="btn-secondary btn-tl" title="Collapse / expand timeline">▾</button>
+        </div>
+        <div id="timeline-canvas-wrap" class="timeline-canvas-wrap">
+            <canvas id="timeline-canvas"></canvas>
+        </div>
+    </div>
+
     <!-- Status Bar (full-width bottom) -->
     <div id="status-bar" class="status-bar">
         <div id="status-bar-latest" class="status-bar-latest">

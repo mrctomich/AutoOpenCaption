@@ -4,6 +4,9 @@ import { groupWords, findGroupAtTime, computeLayout, drawGroup, drawDiagnostics 
 import { installResumableFetch, isFileCached } from './resumable-fetch.js';
 import { loadCtcAligner, alignCtcTranscript, CtcAlignerError, CTC_MODEL_ID } from './ctc-aligner.js';
 import { applyCtcResult, revertCtcResult, canCtcRealign } from './ctc-apply.js';
+import { TimelineView } from './timeline-view.js';
+import { commitProposal } from './timeline-model.js';
+import { createPeakBuilder } from './waveform.js';
 
 const waitForTransformers = () => new Promise((resolve) => {
     if (window.TransformersPipeline) {
@@ -446,6 +449,7 @@ const ModelStatus = {
 // ── Main App ────────────────────────────────────────────────
 const App = {
     video: null,
+    timeline: null, // TimelineView dock (see timeline-view.js)
     canvas: null,
     ctx: null,
     transcript: null,
@@ -508,6 +512,7 @@ const App = {
         this.bindKeyboardShortcuts();
         this.bindInspectorControls();
         this.bindCenterResizer();
+        this.bindTimeline();
         this.updateModelStatus();
         this.updateThemeIcon();
         // Probe where every model lives (bundled folder / download cache /
@@ -562,7 +567,16 @@ const App = {
         document.addEventListener('click', (e) => {
             const selector = document.getElementById('word-selector');
             const inspector = document.getElementById('word-inspector');
-            if (!selector.contains(e.target) && !inspector.contains(e.target)) {
+            // The timeline dock manages its own selection (Phase 3): a box
+            // click selects via onTimelineSelectGroup, and this global
+            // outside-click deselect must not cancel it in the same event.
+            // The whole dock counts, not just the canvas: toolbar buttons
+            // (Sel/zoom) act ON the selection, and document-level click fires
+            // before the button's own handler — deselecting here would make
+            // zoom-to-selection always see an empty selection.
+            const dock = document.getElementById('timeline-dock');
+            if (!selector.contains(e.target) && !inspector.contains(e.target)
+                && !(dock && dock.contains(e.target))) {
                 this.selectWord(-1);
             }
         });
@@ -781,13 +795,122 @@ const App = {
         this._audioCache = null;
         this._ctcSnapshot = null;
         this.updateCtcUi();
+        // Timeline: empty until the new video loads (peaks die with the audio).
+        this.timeline?.setPeaks(null);
+        this.timeline?.setDuration(0);
         document.getElementById('drop-zone').classList.add('hidden');
+    },
+
+    // ── Timeline dock ───────────────────────────────────────
+    bindTimeline() {
+        this.timeline = new TimelineView(
+            document.getElementById('timeline-dock'),
+            document.getElementById('timeline-canvas'),
+            {
+                onSeek: (t) => {
+                    if (this.video.src && Number.isFinite(this.video.duration)) {
+                        this.video.currentTime = t;
+                    }
+                },
+                // Live caption groups — rebuilt by rebuildLayout() after every
+                // edit, so lane boxes always match exported cue boundaries.
+                getGroups: () => this.captionGroups || [],
+                // Live transcript word array (Phase 4: sub-boxes, ghost bounds).
+                getAllWords: () => (this.transcript && this.transcript.words) || [],
+                onSelectGroup: (sel) => this.onTimelineSelectGroup(sel),
+                // Phase 4d: a completed drag commits through the funnel.
+                onGestureEnd: (info) => this.applyTimelineEdit(info),
+            },
+        );
+    },
+
+    /**
+     * Single mutation funnel for timeline gestures (Phase 4d). A released
+     * ghost reports its final clamped proposal (Map of word index →
+     * { start, end }); commitProposal() validates it PURE, and only a
+     * non-empty mutation list gets an undo save — exactly one saveState()
+     * per completed gesture, none for zero-delta or returned-to-origin
+     * drags. Writes touch ONLY start/end (+ the userAdjusted flag);
+     * orig/original/deleted/estimated/unplaced side fields are never
+     * modified (R2).
+     * Groups are derived from words, so a move can reflow them — accepted
+     * design consequence, surfaced as a status note when it happens (R3).
+     */
+    applyTimelineEdit({ proposal } = {}) {
+        if (!this.transcript) return false;
+        const words = this.transcript.words;
+        const mutations = commitProposal(words, proposal);
+        if (!mutations.length) return false;
+        const groupsBefore = this.captionGroups.length;
+        this.saveState();
+        for (const m of mutations) {
+            const word = words[m.index];
+            word.start = m.start;
+            word.end = m.end;
+            word.userAdjusted = true; // "addressed" outline agrees with the editor
+        }
+        this.rebuildLayout();            // also timeline.invalidate() (lanes)
+        this.renderTranscriptEditor();
+        this.renderTranscriptDisplay();
+        this.updateInspector();
+        this.updatePreview();
+        this.timeline?.invalidate();
+        if (this.captionGroups.length !== groupsBefore) {
+            Status.msg(`Timing change regrouped captions: ${groupsBefore} → ${this.captionGroups.length} groups.`);
+        }
+        return true;
+    },
+
+    /**
+     * Caption box clicked/double-clicked in the timeline (Phase 3).
+     * Click selects the group's first word WITHOUT seeking (the editor stays
+     * the selection authority; the box highlight follows via selectWord →
+     * setSelectedWord); double-click additionally seeks to the group start
+     * (matches word-chip double-click-to-jump semantics). Shift-click on the
+     * already-selected word deselects.
+     */
+    onTimelineSelectGroup({ word, seek = false, toggle = false }) {
+        if (!word || !this.transcript) return;
+        const idx = this.transcript.words.indexOf(word);
+        if (idx < 0) return; // word no longer in the transcript (stale frame)
+        if (toggle && idx === this.selectedWordIndex && !seek) {
+            this.selectWord(-1);
+            return;
+        }
+        // seek:false keeps a plain box click from moving the playhead.
+        this.selectWord(idx, { seek });
+    },
+
+    /**
+     * Build the waveform peak table from the cached decoded audio in ~5 s
+     * slices (setTimeout between slices keeps the UI responsive; the view
+     * draws completed buckets as they arrive). Aborted implicitly when
+     * _audioCache is replaced by a new video/transcription.
+     */
+    buildWaveformPeaks() {
+        const audio = this._audioCache;
+        if (!audio || !this.timeline) return;
+        const builder = createPeakBuilder({ sampleRate: 16000 });
+        const SLICE = 80000; // 5 s of 16 kHz mono float
+        let pos = 0;
+        const step = () => {
+            if (this._audioCache !== audio) return; // stale: newer audio took over
+            const end = Math.min(pos + SLICE, audio.samples.length);
+            builder.feed(audio.samples.subarray(pos, end));
+            pos = end;
+            this.timeline.setPeaks(builder.snapshot());
+            if (pos < audio.samples.length) {
+                setTimeout(step, 0);
+            }
+        };
+        setTimeout(step, 0);
     },
 
     onVideoLoaded() {
         document.getElementById('btn-transcribe').disabled = false;
         document.getElementById('btn-play').disabled = false;
         document.getElementById('scrubber').disabled = false;
+        this.timeline?.setDuration(this.video.duration);
         this.resizeCanvas();
         this.updateTimeDisplay();
         window.addEventListener('resize', () => this.resizeCanvas());
@@ -834,10 +957,13 @@ const App = {
         if (!this.transcript) {
             this.captionGroups = [];
             this.captionLayout = [];
-            return;
+        } else {
+            this.captionGroups = groupWords(this.transcript.words, this.style.grouping);
+            this.captionLayout = computeLayout(this.captionGroups, this.style, this.canvas.width, this.canvas.height);
         }
-        this.captionGroups = groupWords(this.transcript.words, this.style.grouping);
-        this.captionLayout = computeLayout(this.captionGroups, this.style, this.canvas.width, this.canvas.height);
+        // Caption boxes in the timeline mirror the exported cue boundaries,
+        // so every grouping/layout rebuild refreshes the lanes.
+        this.timeline?.invalidate();
     },
 
     togglePlay() {
@@ -866,6 +992,9 @@ const App = {
 
     updatePreview() {
         this.updateTimeDisplay();
+        // Timeline playhead follows playback from here (single writer for
+        // that direction; user seeks go the other way via onSeek).
+        if (this.timeline) this.timeline.setTime(this.video.currentTime);
         if (!this.transcript || !this.video.duration) return;
 
         const time = this.video.currentTime;
@@ -1536,6 +1665,9 @@ const App = {
             // Cache the decoded 16 kHz audio for the experimental CTC
             // realign — same buffer Whisper is fed, never re-derived.
             this._audioCache = { samples: audioSamples, file: this.videoFile };
+            // Waveform peaks build from the same buffer while transcription
+            // runs (worker-bound) — the dock fills in progressively.
+            this.buildWaveformPeaks();
 
             const modelId = document.getElementById('sel-model').value;
             const language = document.getElementById('sel-language').value;
@@ -2101,7 +2233,7 @@ const App = {
         }
     },
 
-    selectWord(index) {
+    selectWord(index, { seek = true } = {}) {
         const activeEl = document.activeElement;
         if (activeEl && activeEl.contentEditable === 'true') {
             activeEl.blur();
@@ -2110,10 +2242,16 @@ const App = {
         this.selectedWordIndex = index;
         this.renderTranscriptEditor();
         this.updateInspector();
+        // Phase 3 sync: the timeline highlights the caption box containing
+        // the selected word (no-op when the dock has no groups yet).
+        this.timeline?.setSelectedWord(
+            (index >= 0 && this.transcript) ? this.transcript.words[index]?.id ?? null : null);
         
         // Clicking a word always moves the playhead to its start time,
         // whether or not the video is playing — makes precise editing easy.
-        if (index >= 0 && this.transcript && this.video && this.video.src) {
+        // Timeline box clicks pass seek:false (select without moving the
+        // playhead; double-click seeks) — design rule for the editor⇄timeline sync.
+        if (seek && index >= 0 && this.transcript && this.video && this.video.src) {
             const word = this.transcript.words[index];
             this.video.currentTime = word.start;
         }
