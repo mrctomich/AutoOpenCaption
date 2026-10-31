@@ -180,3 +180,34 @@ test('boxRect: normal span, minimum width, degenerate spans', () => {
     assert.ok(boxRect(vp, 5, 4).w >= MIN_BOX_PX);
     assert.ok(boxRect(vp, NaN, 4).w >= MIN_BOX_PX);
 });
+
+test('boxRect: widened vs degenerate is a property of TIME, not of zoom', () => {
+    // A perfectly valid 0.15 s cue at pps 20 is 3 px — bumped to MIN_BOX_PX
+    // for visibility, but it is NOT broken: degenerate stays false.
+    const vp = createViewport({ durationSec: 600, viewWidthPx: 1200, pps: 20 });
+    const r = boxRect(vp, 100, 100.15);
+    assert.equal(r.degenerate, false);
+    assert.equal(r.widened, true);
+    assert.equal(r.w, MIN_BOX_PX);
+    // The TRUE extent is carried alongside for packing (never the bumped one).
+    assert.ok(Math.abs(r.trueX - timeToX(vp, 100)) < EPS);
+    assert.ok(Math.abs(r.trueW - 3) < EPS);
+    // Zero-length: degenerate (dashed warning), NOT merely widened; trueW 0.
+    const z = boxRect(vp, 300, 300);
+    assert.equal(z.degenerate, true);
+    assert.equal(z.widened, false);
+    assert.equal(z.trueW, 0);
+    // Inverted: degenerate; trueW floored at 0, never negative.
+    const inv = boxRect(vp, 5, 4);
+    assert.equal(inv.degenerate, true);
+    assert.equal(inv.trueW, 0);
+    // NaN: degenerate; trueW stays NaN so packLanes reserves a lane.
+    assert.equal(boxRect(vp, NaN, 4).degenerate, true);
+    assert.ok(Number.isNaN(boxRect(vp, NaN, 4).trueW));
+    // Normal visible span: neither widened nor degenerate, true == drawn.
+    const ok = boxRect(vp, 10, 12);
+    assert.equal(ok.widened, false);
+    assert.equal(ok.degenerate, false);
+    assert.ok(Math.abs(ok.trueW - ok.w) < EPS);
+    assert.ok(Math.abs(ok.trueX - ok.x) < EPS);
+});

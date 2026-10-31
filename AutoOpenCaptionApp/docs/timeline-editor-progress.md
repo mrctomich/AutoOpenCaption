@@ -869,3 +869,46 @@ that only untouchable words can cause (now warned about).
 
 **Next phase starting point:** unchanged — Phase 5 (create
 captions/words + undo/redo; answer Q4 first).
+
+---
+
+## Lane-packing fix — MIN_BOX_PX widening must not invent lanes (dogfood, 2026-10-31)
+
+**Symptom (user screenshot):** with max-words=1 and zoomed out, every short
+cue stacked into its own lane row AND was drawn as a dashed "degenerate"
+warning.
+
+**Root cause:** `boxRect` bumped sub-`MIN_BOX_PX` spans to 4 px and conflated
+two different things in one flag — `degenerate` meant "was bumped", which at
+low zoom is true for every perfectly valid short cue. `packLanes` then packed
+by the WIDENED box, so chronologically-adjacent slivers (true gap < 4 px)
+collided and manufactured lanes.
+
+**Fix (`timeline-model.js`):**
+- `boxRect` now separates the concepts: `degenerate: true` only when the TIME
+  span itself is broken (zero/inverted/non-finite — dashed render stays
+  meaningful); `widened: true` for valid spans bumped to `MIN_BOX_PX`; and it
+  carries the TRUE extent `trueX`/`trueW` (NaN stays NaN) alongside.
+- `groupBoxes` passes the three new fields through.
+- `packLanes` packs by TRUE extent (`trueX ?? x` — manual/test boxes without
+  the fields keep working). Invalid cues share ONE reserved lane after all
+  valid lanes: they render at x=NaN (invisible) and must neither invent one
+  lane per broken cue nor poison a shared lane end and push every later valid
+  cue down a row.
+
+**Tests:** +4 → `node --test tests/*.test.mjs` = **178 pass, 0 fail**
+(baseline 174). `boxRect` widened-vs-degenerate matrix; low-zoom sliver
+regression (12 cues → 1 lane); genuine overlap still splits at low zoom;
+invalid-cue reserved-lane matrix.
+
+**Browser QA (`scripts/tl_lanes_fix_qa.cjs`, headless Chrome):** 8/8 PASS —
+10 short cues at pps 8 render one lane (pixel-probed rows), real overlap
+still splits to two rendered rows, NaN cue reserves exactly one extra lane,
+zero page errors. Screenshots: `lanes_lowzoom.png`, `lanes_overlap.png`.
+
+**Files changed:** `app/assets/timeline-model.js`,
+`tests/timeline-model.test.mjs`, `tests/timeline-lanes.test.mjs`,
+`scripts/tl_lanes_fix_qa.cjs`, this doc.
+
+**Next phase starting point:** unchanged — Phase 5 (create captions/words +
+undo/redo; answer Q4 first).

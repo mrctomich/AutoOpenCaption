@@ -97,6 +97,51 @@ test('packLanes: empty input yields one empty lane', () => {
     assert.equal(laneCount, 1);
 });
 
+test('packLanes: widened slivers at low zoom do NOT manufacture lanes', () => {
+    // Regression (user dogfood): max-words=1 at low zoom bumped every short
+    // cue to MIN_BOX_PX and packed BY THE WIDENED BOX — every word piled
+    // into its own lane. 12 valid 0.15 s cues every 0.8 s at pps 4: true
+    // gap 3.2 px, drawn box 4 px → visual overlap, but ONE lane because
+    // packing follows the true time extent.
+    const vp = createViewport({ durationSec: 30, viewWidthPx: 120, pps: 4 });
+    const groups = [];
+    for (let i = 0; i < 12; i++) groups.push(g(i + 1, i * 0.8, i * 0.8 + 0.15));
+    const boxes = groupBoxes(vp, groups);
+    for (const b of boxes) {
+        assert.equal(b.widened, true);
+        assert.equal(b.degenerate, false);
+    }
+    // Sanity: the widened boxes really do overlap visually.
+    assert.ok(boxes[1].x < boxes[0].x + boxes[0].w);
+    const { laneOf, laneCount } = packLanes(boxes);
+    assert.equal(laneCount, 1);
+    assert.deepEqual(laneOf, boxes.map(() => 0));
+});
+
+test('packLanes: genuine time overlap still splits lanes at low zoom', () => {
+    const vp = createViewport({ durationSec: 30, viewWidthPx: 120, pps: 4 });
+    const groups = [g(1, 2, 5), g(2, 4, 7)]; // true overlap, not widening
+    const { laneOf, laneCount } = packLanes(groupBoxes(vp, groups));
+    assert.deepEqual(laneOf, [0, 1]);
+    assert.equal(laneCount, 2);
+});
+
+test('packLanes: invalid cues share a reserved lane, never push valid cues down', () => {
+    const boxes = [
+        { x: 0, w: MIN_BOX_PX, trueX: NaN, trueW: NaN },  // broken cue FIRST
+        { x: 100, w: 20, trueX: 100, trueW: 20 },         // valid → must stay lane 0
+        { x: 200, w: 20, trueX: 200, trueW: 20 },         // valid → still lane 0
+        { x: 0, w: MIN_BOX_PX, trueX: NaN, trueW: NaN },  // broken → reserved lane
+    ];
+    const { laneOf, laneCount } = packLanes(boxes);
+    assert.deepEqual(laneOf, [1, 0, 0, 1]);
+    assert.equal(laneCount, 2);
+    // Broken-only input: one lane total.
+    const only = packLanes([{ x: 0, w: 4, trueX: NaN, trueW: NaN }]);
+    assert.deepEqual(only.laneOf, [0]);
+    assert.equal(only.laneCount, 1);
+});
+
 // ── hitTestBoxes ──────────────────────────────────────────────────
 
 test('hitTestBoxes: point inside a box returns its input index', () => {

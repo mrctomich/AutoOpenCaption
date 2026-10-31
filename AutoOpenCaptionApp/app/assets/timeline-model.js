@@ -175,19 +175,31 @@ export function formatRulerTime(t, step) {
  * Screen rect for a stored [start, end] span. Width is at least
  * MIN_BOX_PX (centered on the true position when clamped up) so collapsed
  * or zero-length stored times remain visible; the stored values are never
- * touched here. `degenerate: true` marks widths that were bumped.
+ * touched here. `degenerate: true` marks TIME spans that are zero/inverted/non-finite
+ * (rendered as dashed warnings); `widened: true` marks valid spans bumped
+ * to MIN_BOX_PX for visibility at the current zoom.
  */
 export function boxRect(vp, startSec, endSec) {
-    let x = timeToX(vp, startSec);
-    let w = (endSec - startSec) * vp.pps;
-    let degenerate = false;
+    const trueX = timeToX(vp, startSec);
+    const rawW = (endSec - startSec) * vp.pps;
+    let x = trueX, w = rawW;
+    // `degenerate` is a property of the TIME span (zero, inverted or
+    // non-finite), NEVER of the zoom level: at low zoom a perfectly valid
+    // short cue must not be flagged as broken just because it is < MIN_BOX_PX.
+    const degenerate = !(endSec > startSec);
+    let widened = false;
     if (!(w >= MIN_BOX_PX)) { // also catches NaN / negative spans
-        degenerate = !(endSec > startSec) || w < MIN_BOX_PX;
+        widened = !degenerate;
         const center = x + (Number.isFinite(w) ? w : 0) / 2;
         x = center - MIN_BOX_PX / 2;
         w = MIN_BOX_PX;
     }
-    return { x, w, degenerate };
+    // TRUE (unwidened) extent, used by packLanes: cues pack by when they
+    // actually happen, so MIN_BOX_PX widening at low zoom cannot
+    // manufacture extra lanes (max-words=1 at low zoom used to pile every
+    // short word into its own lane). NaN spans stay NaN → each invalid cue
+    // takes its own lane instead of hiding behind a neighbour.
+    return { x, w, degenerate, widened, trueX, trueW: Number.isFinite(rawW) ? Math.max(0, rawW) : NaN };
 }
 
 // ── Caption boxes (Phase 3) ───────────────────────────────────────
@@ -210,6 +222,9 @@ export function groupBoxes(vp, groups, allWords = null) {
             x: r.x,
             w: r.w,
             degenerate: r.degenerate,
+            widened: r.widened,
+            trueX: r.trueX,
+            trueW: r.trueW,
             // Word the box selects on click: the group's first live word.
             word: g.words && g.words.length ? g.words[0] : null,
             // Transcript-array index per group word (parallel to g.words;
@@ -231,22 +246,42 @@ export function groupBoxes(vp, groups, allWords = null) {
  */
 export function packLanes(boxes, slackPx = 1) {
     const laneOf = new Array(boxes.length).fill(0);
-    const laneEnds = []; // visual right edge of the last box per lane
+    const laneEnds = []; // TRUE right edge (seconds→px) of the last VALID box per lane
+    const invalidIdx = []; // cues with no finite true extent
     for (let i = 0; i < boxes.length; i++) {
         const b = boxes[i];
+        // Pack by the TRUE time extent, not the MIN_BOX_PX-widened display
+        // box: chronological cues never collide, no matter how far out the
+        // user has zoomed (widened slivers may visually overlap ~2px, which
+        // is far more honest than inventing lanes).
+        const bx = b.trueX ?? b.x;
+        const bw = b.trueW ?? b.w;
+        if (!Number.isFinite(bx) || !Number.isFinite(bw)) {
+            invalidIdx.push(i); // no position at all → reserved lane, below
+            continue;
+        }
         let placed = false;
         for (let l = 0; l < laneEnds.length; l++) {
-            if (b.x >= laneEnds[l] - slackPx) {
+            if (bx >= laneEnds[l] - slackPx) {
                 laneOf[i] = l;
-                laneEnds[l] = b.x + b.w;
+                laneEnds[l] = bx + bw;
                 placed = true;
                 break;
             }
         }
         if (!placed) {
             laneOf[i] = laneEnds.length;
-            laneEnds.push(b.x + b.w);
+            laneEnds.push(bx + bw);
         }
+    }
+    // Invalid cues (NaN start/end) render at x=NaN — i.e. nowhere. They
+    // share ONE reserved lane after all valid lanes: they must neither
+    // invent one lane per broken cue nor poison a shared lane end and
+    // push every later valid cue down a row.
+    if (invalidIdx.length) {
+        const reserved = laneEnds.length;
+        for (const i of invalidIdx) laneOf[i] = reserved;
+        laneEnds.push(Infinity);
     }
     return { laneOf, laneCount: Math.max(1, laneEnds.length) };
 }
