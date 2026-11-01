@@ -17,13 +17,13 @@ the next phase only starts when the user authorizes it in a fresh session.
 | 2 | Timeline panel foundation: ruler, waveform, scroll, zoom, playhead | **DONE 2026-10-27** |
 | 3 | Caption boxes + selection sync + double-click seek | **DONE 2026-10-28** |
 | 4 | Direct caption timing edits (drag move, edge resize) | **DONE 2026-10-30** — split 4a–4f all complete: 4a b512f72, 4b 00fffb8 (+QA 25/25), 4c 3c8e740 (+QA 19/19), 4d 0663881 (+QA 20/20), 4e 45decb2 (+QA 29/29), 4f (this record: export-reflection QA 9/9, docs, PR) |
-| 5 | Create missing captions/words, undo/redo integration | **IN PROGRESS** — split 5a–5f: 5a 0e1fcb3, 5b c96849b, 5c+5d (this record). Remaining: **5e** (editability end-to-end), **5f** (browser QA + closeout) |
+| 5 | Create missing captions/words, undo/redo integration | **IN PROGRESS** — split 5a–5f: 5a 0e1fcb3, 5b c96849b, 5c+5d 35d6212, 5e (this record: joinWordTexts shared join + box-label latent-bug fix, 229 green). Remaining: **5f** (browser QA + closeout) |
 | 6 | Integration, regression testing, polish | not started |
 
 ## How to resume (fresh session)
 
-1. `cd AutoOpenCaptionApp && node --test tests/*.test.mjs` — must be **208 pass / 0 fail** before starting (baseline verified 2026-11-01 after Phase 5c+5d; was 192 after 5a, 205 after 5b).
-2. Read this file (architecture + design below) — do not re-explore the repo from scratch. **Phase 4 (4a–4f) is COMPLETE**; **Phase 5 is 4/6 done (5a–5d)** — see the Phase 5 records below for the shipped state. Next is **5e** (make a fresh caption editable end-to-end: text edit on a new word, empty-text edge cases in grouping/render, preview + SRT/VTT reflection, new box selectable/draggable with CTC protection). Then 5f (browser QA + closeout).
+1. `cd AutoOpenCaptionApp && node --test tests/*.test.mjs` — must be **229 pass / 0 fail** before starting (baseline verified 2026-11-01 after Phase 5e; was 208 after 5c+5d, 192 after 5a, 205 after 5b).
+2. Read this file (architecture + design below) — do not re-explore the repo from scratch. **Phase 4 (4a–4f) is COMPLETE**; **Phase 5 is 5/6 done (5a–5e)** — see the Phase 5 records below for the shipped state. Next is **5f** (browser QA `scripts/tl_phase5_qa.cjs` modeled on `tl_phase4e_qa.cjs`: button create, empty-lane dbl-click create, undo/redo LIFO incl. rapid mixed gestures, unique-id audit, export reflection, F2 text edit on a fresh word in the real browser; then docs closeout, push, PR #13 update).
 3. Begin the next unchecked phase above. Finish its tests, append its record, STOP.
 4. Push note: plain `git push` hangs here (Git Credential Manager prompt with no TTY). Working command:
    `GIT_TERMINAL_PROMPT=0 git -c credential.helper= push "https://x-access-token:$(gh auth token)@github.com/mrctomich/AutoOpenCaption.git" feature/interactive-timeline-editor`
@@ -1072,3 +1072,80 @@ edge cases in `groupWords` + canvas render, new word appears in preview
 canvas and SRT/VTT export, timeline box selectable/draggable like any word
 (CTC-protection already via `userAdjusted:true` from 5a). Then 5f (browser
 QA script `tl_phase5_qa.cjs`, docs closeout, push, PR #13 update).
+
+---
+
+## Phase 5e — fresh captions fully editable end-to-end: COMPLETE (2026-11-01)
+
+**Shipped:**
+
+- `joinWordTexts(words)` in `timeline-model.js` — the single shared cue-text
+  join: trims each word, drops empty/whitespace-only entries, joins with
+  SINGLE spaces. All four call sites now use it: `generateSRT`,
+  `generateVTT`, `renderTranscriptDisplay`, and the timeline box label.
+  The old plain `join(' ')` produced leading spaces (`['', 'alpha']` →
+  `' alpha'`) or double spaces (`['a', '', 'b']` → `'a  b'`) in SRT/VTT
+  export, the transcript display pane, and box labels.
+- **Latent bug fixed (view):** the timeline box label read `b.group.text` —
+  a field derived groups do NOT carry (`groupWords` emits
+  `{ words, start, end }`) — so box labels silently never rendered (latent
+  since Phase 2). `_drawLanes` now derives the label from live words via
+  `joinWordTexts(b.group.words)`; the label check is `b.w >= 28 && label`.
+- Text-edit paths confirmed end-to-end and contract-pinned (pre-existing
+  code, not rewritten): `enterTextEdit(index)` (chip dbl-click at
+  app.js:2284, F2 → `selectedWordIndex` at 2655) commits `textContent.trim()`
+  with exactly ONE `saveState()` and the full refresh chain
+  (rebuildLayout → updatePreview → updateInspector); Escape restores
+  `originalText` without writing. The inspector text field writes the
+  trimmed value (possibly `''`) by `selectedWordIndex` with one save. A
+  fresh word created by the 5b funnel is editable through these paths
+  immediately — the planned index is the live index after the splice
+  (asserted in tests).
+
+**Contracts locked by tests (21 new, `tests/timeline-edit-text.test.mjs`):**
+- `joinWordTexts`: head/mid empty, whitespace-only words, all-empty
+  placeholder (→ `''`), null/undefined/empty input, malformed entries.
+- A fresh EMPTY caption (`planNewCaption` with `text: ''`) forms a valid
+  cue with a finite span, exports an empty text line, never crashes; an
+  empty word absorbed into a neighbour group stays clean (`'charlie'`,
+  not `' charlie'`).
+- SRT/VTT cue-line mirrors: no leading whitespace, no double spaces; typed
+  fresh text exports; SRT/VTT parity through the shared helper.
+- Transcript display pane stays clean with placeholder words.
+- `computeLayout` (deterministic `measureText` stub): an empty word keeps
+  its slot at zero width with finite x; an all-empty group gets
+  `totalWidth 0`, finite x — no crash.
+- Text edit by index flows to groups, export text, and display text
+  (`'alpha fresh caption bravo'`); inspector clearing a word to `''` stays
+  clean downstream.
+- `groupBoxes`: the fresh caption gets a box with label `'fresh'` and
+  `wordIndex` mapping back to its live array index — the selectable/
+  draggable data-side contract (CTC protection already via 5a's
+  `userAdjusted:true`).
+- Source guards (same convention as 5b/5c/5d): SRT/VTT/display all use
+  `joinWordTexts` with no raw joins left; `enterTextEdit` by index + one
+  save + refresh chain + Escape-cancel; F2 and chip dblclick route by
+  index; inspector text handler writes the trimmed value with exactly one
+  save; view label derived from live words, zero `b.group.text` reads left.
+
+**Tests:** `node --test tests/*.test.mjs` = **229 pass, 0 fail**
+(baseline 208).
+
+**Files changed:** `app/assets/timeline-model.js` (+`joinWordTexts`),
+`app/assets/app.js` (import + SRT/VTT/display joins),
+`app/assets/timeline-view.js` (box label from live words),
+`tests/timeline-edit-text.test.mjs` (new, 21), this doc.
+
+**Known limitations / deferred to 5f:** real-browser end-to-end (F2 typing
+into a fresh word, button create, dbl-click create, undo/redo LIFO with
+rapid mixed gestures, unique-id audit, export reflection on the live DOM)
+is 5f's job — `scripts/tl_phase5_qa.cjs` modeled on `tl_phase4e_qa.cjs`
+(playwright-core headless Chrome, `SCRATCH`/`NODE_PATH` as `C:/` native
+paths, stdin `</dev/null`, wrap `App.addCaptionAt`/`App.saveState` without
+replacing hooks).
+
+**Next sub-phase:** 5f — browser QA + closeout: `scripts/tl_phase5_qa.cjs`
+(button create, empty-lane dbl-click create, undo/redo LIFO incl. rapid
+mixed gestures, unique-id audit, export reflection, F2 text edit on a fresh
+word), docs closeout, push, PR #13 update. STOP after 5f — do NOT merge
+before the user's word.

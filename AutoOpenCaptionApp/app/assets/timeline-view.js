@@ -35,7 +35,7 @@ import {
     timeToX, xToTime, pickRulerStep, rulerTicks, formatRulerTime,
     groupBoxes, packLanes, hitTestBoxes, frameSpan, MIN_BOX_PX, boxRect,
     grabZone, editBounds, editBoundsForGroup, clampDelta, resolveGesture,
-    wordBoxes, hitTestWordBox, WORD_SUB_PPS, applyGestureDelta,
+    wordBoxes, hitTestWordBox, WORD_SUB_PPS, applyGestureDelta, joinWordTexts,
 } from './timeline-model.js';
 import { columnsFromPeaks } from './waveform.js';
 
@@ -824,7 +824,12 @@ export class TimelineView {
             }
 
             // Text label when the box is wide enough to fit ~3+ glyphs.
-            if (b.w >= 28 && b.group.text) {
+            // Derived from the live words (joinWordTexts drops empty-text
+            // placeholders) — the derived groups carry no text field, so
+            // reading the dead group text field rendered nothing (latent
+            // Phase 2 bug, fixed in 5e).
+            const label = joinWordTexts(b.group.words);
+            if (b.w >= 28 && label) {
                 ctx.save();
                 this._roundRect(ctx, b.x, y, b.w, bh, 3);
                 ctx.clip();
@@ -832,7 +837,7 @@ export class TimelineView {
                 ctx.font = '10px var(--font-sans, sans-serif)';
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'middle';
-                ctx.fillText(b.group.text, b.x + 5, y + bh / 2, b.w - 8);
+                ctx.fillText(label, b.x + 5, y + bh / 2, b.w - 8);
                 ctx.restore();
             }
         }

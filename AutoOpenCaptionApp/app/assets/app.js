@@ -5,7 +5,7 @@ import { installResumableFetch, isFileCached } from './resumable-fetch.js';
 import { loadCtcAligner, alignCtcTranscript, CtcAlignerError, CTC_MODEL_ID } from './ctc-aligner.js';
 import { applyCtcResult, revertCtcResult, canCtcRealign } from './ctc-apply.js';
 import { TimelineView } from './timeline-view.js';
-import { commitProposal, planNewCaption } from './timeline-model.js';
+import { commitProposal, planNewCaption, joinWordTexts } from './timeline-model.js';
 import { createPeakBuilder } from './waveform.js';
 
 const waitForTransformers = () => new Promise((resolve) => {
@@ -1864,7 +1864,7 @@ const App = {
             // by groupWords(); re-applying the +0.1 minimum here would undo
             // that clamp and re-export overlapping cues (the maxWords=1 bug).
             const end = this.formatSRTTime(group.end);
-            const text = group.words.map(w => w.text).join(' ');
+            const text = joinWordTexts(group.words);
             return `${i + 1}\n${start} --> ${end}\n${text}`;
         }).join('\n\n');
     },
@@ -1876,7 +1876,7 @@ const App = {
             // See generateSRT: never re-inflate the minimum duration past the
             // overlap clamp groupWords already applied.
             const end = this.formatVTTTime(group.end);
-            const text = group.words.map(w => w.text).join(' ');
+            const text = joinWordTexts(group.words);
             return `${start} --> ${end}\n${text}`;
         }).join('\n\n');
         return `WEBVTT\n\n${cues}`;
@@ -2504,7 +2504,7 @@ const App = {
         }
 
         const words = this.transcript.words.filter(w => !w.deleted);
-        const fullText = words.map(w => w.text).join(' ');
+        const fullText = joinWordTexts(words);
         el.textContent = fullText;
     },
 

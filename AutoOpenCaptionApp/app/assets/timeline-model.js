@@ -202,6 +202,24 @@ export function boxRect(vp, startSec, endSec) {
     return { x, w, degenerate, widened, trueX, trueW: Number.isFinite(rawW) ? Math.max(0, rawW) : NaN };
 }
 
+/**
+ * Cue text for a word list (Phase 5e): the words' texts joined with SINGLE
+ * spaces, dropping empty/whitespace-only entries. Fresh captions are created
+ * with no text (planNewCaption default) and the inspector can clear a word's
+ * text — without this filter the plain `join(' ')` produces leading spaces
+ * (`['', 'alpha']` → `' alpha'`) or double spaces (`['a', '', 'b']` →
+ * `'a  b'`) in SRT/VTT export, the transcript display pane, and timeline
+ * box labels. All four call sites share this one join so the exported text
+ * and the on-screen text stay identical.
+ */
+export function joinWordTexts(words) {
+    if (!words || !words.length) return '';
+    return words
+        .map((w) => (w && w.text ? String(w.text).trim() : ''))
+        .filter((t) => t !== '')
+        .join(' ');
+}
+
 // ── Caption boxes (Phase 3) ───────────────────────────────────────
 /**
  * Display boxes for caption groups. Input is `App.captionGroups` verbatim —
