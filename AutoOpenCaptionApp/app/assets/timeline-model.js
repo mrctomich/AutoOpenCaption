@@ -619,3 +619,121 @@ export function commitProposal(words, proposal, eps = 1e-9) {
     });
     return mutations;
 }
+
+// ── Caption creation (Phase 5) ─────────────────────────────────────────
+//
+// Pure planning for user-created captions: the view computes a click time,
+// the App commits the plan. Like commitProposal, this never mutates — the
+// caller splices the returned word at the returned index through the single
+// App funnel (one saveState() per create).
+
+// Matches the renderer's emitted-cue minimum (groupWords clamps to 0.1 s);
+// a planned caption shorter than this can never render as specified.
+export const MIN_CAPTION_SEC = 0.1;
+// Default span for a caption created from a bare click position.
+export const DEFAULT_CAPTION_SEC = 1.0;
+
+/**
+ * Next unique word id: `w####` continuing the max numeric suffix found in
+ * existing ids. The scan must cover splitWord's injected `w<date6>` ids
+ * (six-digit, large) — a plain count would collide with those. If the
+ * computed id is somehow taken, it increments until free.
+ */
+export function nextWordId(words) {
+    let max = 0;
+    const taken = new Set();
+    for (const w of words || []) {
+        const id = w && w.id;
+        if (typeof id !== 'string') continue;
+        taken.add(id);
+        const m = /^w(\d+)$/.exec(id);
+        if (m) max = Math.max(max, parseInt(m[1], 10));
+    }
+    let n = max + 1;
+    while (taken.has(`w${String(n).padStart(4, '0')}`)) n++;
+    return `w${String(n).padStart(4, '0')}`;
+}
+
+/**
+ * Plan a new caption without touching data.
+ *
+ * @param words   current transcript.words (may be null/empty)
+ * @param startSec requested start (click/playhead time). Non-finite ⇒ reject.
+ * @param endSec   optional requested end (omitted ⇒ start + DEFAULT_CAPTION_SEC)
+ * @param text     optional caption text (omitted ⇒ '' — user types it in 5e)
+ * @param durationSec media duration (finite > 0 ⇒ clamps both ends)
+ *
+ * Policy:
+ *  - start clamps into [0, duration]; end into [start + MIN, duration].
+ *  - The span then shrinks into the gap between neighbouring LIVE words
+ *    (deleted words' timings no longer block — the renderer skips them).
+ *    `shrunk: true` reports this. If less than MIN_CAPTION_SEC remains the
+ *    plan is rejected: reason 'no-room' (App shows a status note, no data
+ *    changes) — captions must never overlap spoken words on creation; the
+ *    monotonicity guard and cue clamping stay a repair path, not a routine.
+ *  - The new word is USER data from birth: userAdjusted true and orig*
+ *    baselines equal to the planned span, so CTC realign and drift
+ *    detection both treat it as untouchable (never "modified").
+ *  - `index` keeps the array sorted by start (insertion point after any
+ *    equal-start words, including deleted ones, which keep their place).
+ *
+ * @returns {ok:true, word, index, shrunk} | {ok:false, reason}
+ */
+export function planNewCaption({ words = [], startSec, endSec, text = '', durationSec } = {}) {
+    if (!Number.isFinite(startSec)) return { ok: false, reason: 'bad-start' };
+    let start = Math.max(0, startSec);
+    let end = Number.isFinite(endSec) ? endSec : start + DEFAULT_CAPTION_SEC;
+    const bounded = Number.isFinite(durationSec) && durationSec > 0;
+    if (bounded) {
+        start = Math.min(start, durationSec);
+        end = Math.min(end, durationSec);
+    }
+    if (end - start < MIN_CAPTION_SEC) {
+        // Degenerate/clamped-away span: restore the DEFAULT length first
+        // (a click at the very end of the media still deserves a
+        // full-length caption pulled backwards), falling back to MIN.
+        const maxLen = bounded ? Math.min(DEFAULT_CAPTION_SEC, durationSec) : DEFAULT_CAPTION_SEC;
+        if (maxLen < MIN_CAPTION_SEC) return { ok: false, reason: 'no-room' };
+        end = bounded ? Math.min(start + DEFAULT_CAPTION_SEC, durationSec) : start + DEFAULT_CAPTION_SEC;
+        start = Math.max(0, end - maxLen);
+        if (end - start < MIN_CAPTION_SEC - 1e-9) return { ok: false, reason: 'no-room' };
+    }
+
+    // Shrink into the live gap around the requested span (single pass,
+    // order-independent): the nearest live word ENDING inside pushes our
+    // start right; the nearest live word STARTING inside pulls our end
+    // left; a word fully CONTAINING the span leaves no gap at all.
+    // Deleted words' timings no longer block (the renderer skips them).
+    let prevEnd = null, nextStart = null;
+    for (const w of words) {
+        if (!w || w.deleted) continue;
+        const ws = Number.isFinite(w.start) ? w.start : null;
+        const we = Number.isFinite(w.end) ? w.end : null;
+        if (ws === null || we === null) continue;
+        if (ws < start && we > end) return { ok: false, reason: 'no-room' };
+        if (we > start && we <= end) prevEnd = prevEnd === null ? we : Math.max(prevEnd, we);
+        if (ws >= start && ws < end) nextStart = nextStart === null ? ws : Math.min(nextStart, ws);
+    }
+    let shrunk = false;
+    if (prevEnd !== null) { start = prevEnd; shrunk = true; }
+    if (nextStart !== null) { end = nextStart; shrunk = true; }
+    if (end - start < MIN_CAPTION_SEC) return { ok: false, reason: 'no-room' };
+
+    let index = 0;
+    for (const w of words) {
+        const ws = w && Number.isFinite(w.start) ? w.start : Infinity;
+        if (ws <= start) index++;
+    }
+
+    const word = {
+        id: nextWordId(words),
+        text,
+        start, end,
+        deleted: false,
+        userAdjusted: true,   // created by the user ⇒ CTC never moves it
+        estimated: false,
+        origStart: start,     // baseline = its own span ⇒ never "modified"
+        origEnd: end,
+    };
+    return { ok: true, word, index, shrunk };
+}

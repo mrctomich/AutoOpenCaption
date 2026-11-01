@@ -912,3 +912,68 @@ zero page errors. Screenshots: `lanes_lowzoom.png`, `lanes_overlap.png`.
 
 **Next phase starting point:** unchanged — Phase 5 (create captions/words +
 undo/redo; answer Q4 first).
+
+---
+
+## Phase 5 kickoff — split into 5a–5f (2026-11-01)
+
+**Q4 ANSWERED (was open since Phase 1):** add-caption UX = **both**, as
+proposed: (1) double-click empty lane space creates a caption at the clicked
+time, (2) an explicit "＋ caption at playhead" button in the timeline
+toolbar. Both funnel into the same App mutation — one `saveState()` per
+create, standard undo stack.
+
+**Scope (from the Phase 5 starting point):** create missing captions/words +
+undo/redo integration. New words take `max(id)+1` (ids are `w####` strings —
+parse the numeric part; `splitWord` injects large `w<date6>` ids so the max
+scan must cover them). Array stays sorted by `start` on insert.
+
+**Split — one sub-phase per session, record + STOP after each:**
+
+| Sub | Scope | Surface |
+|-----|-------|---------|
+| **5a** | Pure create logic in `timeline-model.js`: `planNewCaption({words, startSec, endSec?, text?, durationSec})` → `{ok, word, index, reason}` — unique `max(id)+1` id, clamps (0 ≤ start, end ≤ duration, end ≥ start+0.1), "no-room" rejection inside dense runs, sorted insert index; flags `userAdjusted:true, estimated:false`, orig* baseline = new span (so CTC never moves user-created data). Headless tests. NO UI. | model + tests |
+| **5b** | App funnel: `App.addCaptionAt({startSec, endSec?, text?})` — one `saveState()`, splice at planned index, select new word, full refresh chain (rebuildLayout → editor → inspector → preview → timeline). Verify create + delete round-trip through the existing undo/redo stack. | app.js |
+| **5c** | Entry point 1: toolbar "＋ caption at playhead" button (index.html + bind) → `addCaptionAt(playhead)`; disabled without a transcript; status note on no-room rejection. | index.html + app.js |
+| **5d** | Entry point 2: dbl-click empty lane space in the view → new `onAddCaption({startSec})` callback → same App path. Must NOT regress box dbl-click seek, ruler seek, or ghost-drag suppression; view stays data-free (reports, never mutates). | timeline-view.js |
+| **5e** | Make the new caption editable end-to-end: text edit on a fresh word (F2/enterTextEdit by index), placeholder/empty-text edge cases in grouping + render, appears in preview canvas and SRT/VTT export; timeline box selectable/ draggable like any word (CTC-protection via userAdjusted). | app.js + editor |
+| **5f** | Browser QA script (button create, dbl-click create, undo/redo LIFO incl. rapid mixed gestures, unique-id audit, export reflection), docs closeout, push, PR #13 update. | QA + docs |
+
+**Dependencies:** strict order 5a→5b→{5c,5d}→5e→5f. 5c and 5d could share a
+session if context allows after a light 5b.
+
+**Test baseline entering Phase 5:** `node --test tests/*.test.mjs` =
+**179 pass, 0 fail** (178 + CTC follow-up 2 split of the backward-jump test).
+
+---
+
+## Phase 5a — pure create logic (`planNewCaption`) (2026-11-01)
+
+**Shipped:** `timeline-model.js` gains `planNewCaption({words, startSec,
+endSec?, text?, durationSec?})` → `{ok:true, word, index, shrunk}` |
+`{ok:false, reason:'bad-start'|'no-room'}`, plus `nextWordId(words)` and
+constants `MIN_CAPTION_SEC` (0.1, matches groupWords' emitted-cue floor) /
+`DEFAULT_CAPTION_SEC` (1.0). Pure — never mutates input; App commits in 5b.
+
+**Semantics locked by tests (13 new, `tests/timeline-create.test.mjs`):**
+- id = `w####` continuation of max numeric suffix — scan covers splitWord's
+  6-digit `w<date6>` ids (a plain count would collide); taken-id loop guard.
+- start clamps to [0, duration]; degenerate span (click at media end /
+  endSec==startSec) restores the DEFAULT length pulled backwards.
+- Shrink into the live gap: nearest live END inside pushes start right,
+  nearest live START inside pulls end left (single pass, order-independent —
+  prevEnd/nextStart computed before applying); word fully CONTAINING the
+  span ⇒ 'no-room'. < MIN remaining ⇒ 'no-room'. Touching neighbours OK,
+  overlap never.
+- Deleted words' timings don't block; junk entries (null, missing stamps)
+  tolerated; deleted words still count for the sorted insert index.
+- New word flags: `userAdjusted:true, estimated:false, deleted:false`,
+  `origStart/origEnd` = own span ⇒ CTC realign and drift detection both
+  treat user-created captions as untouchable/never-modified.
+
+**Tests:** `node --test tests/*.test.mjs` = **192 pass, 0 fail**
+(baseline 179). No app/view changes — 5b wires the App funnel.
+
+**Next sub-phase:** 5b — `App.addCaptionAt()` mutation funnel: one
+`saveState()`, splice plan.word at plan.index, `selectWord(newIndex)`, full
+refresh chain; status note on 'no-room'; undo/redo round-trip of create. STOP.
