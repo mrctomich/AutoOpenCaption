@@ -17,13 +17,13 @@ the next phase only starts when the user authorizes it in a fresh session.
 | 2 | Timeline panel foundation: ruler, waveform, scroll, zoom, playhead | **DONE 2026-10-27** |
 | 3 | Caption boxes + selection sync + double-click seek | **DONE 2026-10-28** |
 | 4 | Direct caption timing edits (drag move, edge resize) | **DONE 2026-10-30** — split 4a–4f all complete: 4a b512f72, 4b 00fffb8 (+QA 25/25), 4c 3c8e740 (+QA 19/19), 4d 0663881 (+QA 20/20), 4e 45decb2 (+QA 29/29), 4f (this record: export-reflection QA 9/9, docs, PR) |
-| 5 | Create missing captions/words, undo/redo integration | not started — **next phase** |
+| 5 | Create missing captions/words, undo/redo integration | **IN PROGRESS** — split 5a–5f: 5a 0e1fcb3, 5b c96849b, 5c+5d (this record). Remaining: **5e** (editability end-to-end), **5f** (browser QA + closeout) |
 | 6 | Integration, regression testing, polish | not started |
 
 ## How to resume (fresh session)
 
-1. `cd AutoOpenCaptionApp && node --test tests/*.test.mjs` — must be **168 pass / 0 fail** before starting (baseline verified 2026-10-30 after Phase 4f; was 153 after 4c, 168 since 4d).
-2. Read this file (architecture + design below) — do not re-explore the repo from scratch. **Phase 4 (4a–4f) is COMPLETE** — see "Phase 4 complete — as-built architecture" for the shipped state. Next is **Phase 5** (create captions/words + undo/redo integration); if it looks heavy for one context window, split it 4a–4f-style (one sub-phase per session, record + STOP) rather than risking a mid-phase cutoff.
+1. `cd AutoOpenCaptionApp && node --test tests/*.test.mjs` — must be **208 pass / 0 fail** before starting (baseline verified 2026-11-01 after Phase 5c+5d; was 192 after 5a, 205 after 5b).
+2. Read this file (architecture + design below) — do not re-explore the repo from scratch. **Phase 4 (4a–4f) is COMPLETE**; **Phase 5 is 4/6 done (5a–5d)** — see the Phase 5 records below for the shipped state. Next is **5e** (make a fresh caption editable end-to-end: text edit on a new word, empty-text edge cases in grouping/render, preview + SRT/VTT reflection, new box selectable/draggable with CTC protection). Then 5f (browser QA + closeout).
 3. Begin the next unchecked phase above. Finish its tests, append its record, STOP.
 4. Push note: plain `git push` hangs here (Git Credential Manager prompt with no TTY). Working command:
    `GIT_TERMINAL_PROMPT=0 git -c credential.helper= push "https://x-access-token:$(gh auth token)@github.com/mrctomich/AutoOpenCaption.git" feature/interactive-timeline-editor`
@@ -1017,3 +1017,58 @@ expectations from planNewCaption's shrink rules, never intuition.
 disabled without a transcript). 5d after that (dbl-click empty lane →
 `onAddCaption({startSec})` view callback — view reports, never mutates).
 STOP after 5d unless context is clearly ample.
+
+---
+
+## Phase 5c + 5d — create entry points: toolbar button + empty-lane dbl-click (2026-11-01)
+
+Shipped together as allowed by the 5 kickoff ("5c and 5d could share a
+session"). Both entry points are THIN: they only call the 5b funnel; no
+planning or mutation logic lives in the view or the toolbar.
+
+**5c (toolbar button):** `index.html` gets
+`<button id="btn-tl-add-caption" ... disabled>＋</button>` in the timeline
+toolbar (before "Sel"). `timeline-view.js` `_bindToolbar()` binds
+`click → this.onAddCaption({ startSec: null })` (null = "resolve it
+yourself"). `app.js` `rebuildLayout()` gates enablement:
+`addBtn.disabled = !this.transcript` — so it enables exactly when a
+transcript exists, including after load/clear via any path that rebuilds.
+
+**5d (empty-lane dbl-click):** `TimelineView` constructor accepts
+`onAddCaption = () => {}`. The existing canvas `dblclick` handler gains an
+`else` branch on the box hit-test: no hit below `_laneTop` →
+`xToTime(viewport, x)` → guarded (`Number.isFinite && t >= 0`) →
+`onAddCaption({ startSec: t })`. Box dbl-click keeps the seek-select
+behavior untouched; ruler area still returns early (`y < _laneTop`).
+Known accepted quirk: the two single-clicks of a dbl-click fire first, so
+a dbl-click on empty lane also seeks there — harmless (playhead lands on
+the spot you are creating at, and create never seeks).
+
+**App wiring (both):** `bindTimeline` passes
+`onAddCaption: ({ startSec } = {}) => this.addCaptionAt({ startSec: finite
+? startSec : (video.currentTime finite ? it : 0) })` — one funnel, one
+dispatch point.
+
+**Tests:** `tests/timeline-create-funnel.test.mjs` +3 (13 → 16): button
+exists + starts disabled + view report-only (no `saveState|splice|addCaptionAt|transcript`
+in `_bindToolbar`), dblclick branch contract (box select kept, xToTime add
+path, add is the `i == null` else), App routing with playhead fallback.
+Same source-guard convention as the 5b guards.
+
+**Successes:** all 16 funnel tests green first try; full suite
+`node --test tests/*.test.mjs` = **208 pass / 0 fail** (baseline 205). No
+regression in the 3 dblclick-sensitive paths at source level (box select,
+ruler early-return, ghost drag lives in pointer handlers — untouched).
+
+**Not yet verified (defer to 5f browser QA):** real click/dbl-click
+dispatch end-to-end (no headless run this session; per convention browser
+QA is 5f's job — add `scripts/tl_phase5_qa.cjs` modeled on
+`tl_phase4e_qa.cjs`: playwright-core + headless Chrome, SCRATCH env =
+native C:/ path with `tl_clip_60.mp4`, run with stdin `</dev/null`).
+
+**Next sub-phase:** 5e — make a fresh caption editable end-to-end: text
+edit on a new word (F2/`enterTextEdit` by index), placeholder/empty-text
+edge cases in `groupWords` + canvas render, new word appears in preview
+canvas and SRT/VTT export, timeline box selectable/draggable like any word
+(CTC-protection already via `userAdjusted:true` from 5a). Then 5f (browser
+QA script `tl_phase5_qa.cjs`, docs closeout, push, PR #13 update).

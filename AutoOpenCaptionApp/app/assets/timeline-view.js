@@ -66,8 +66,13 @@ export class TimelineView {
      * @param onGestureEnd ({ gesture, wordIndexes, delta, proposal }) => void —
      *                   fired on release of a ghost drag with a non-zero
      *                   clamped delta (Phase 4c reports; Phase 4d commits)
+     * @param onAddCaption ({ startSec }) => void — user asked for a new
+     *                   caption: toolbar button (startSec: null → App uses
+     *                   the playhead) or double-click on an EMPTY lane spot
+     *                   (startSec: time under the cursor). The view reports
+     *                   only; planning/commit lives in App.addCaptionAt.
      */
-    constructor(container, canvas, { onSeek = () => {}, getGroups = () => [], getAllWords = () => [], onSelectGroup = () => {}, onGestureEnd = () => {} } = {}) {
+    constructor(container, canvas, { onSeek = () => {}, getGroups = () => [], getAllWords = () => [], onSelectGroup = () => {}, onGestureEnd = () => {}, onAddCaption = () => {} } = {}) {
         this.container = container;
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
@@ -76,6 +81,7 @@ export class TimelineView {
         this.getAllWords = getAllWords;
         this.onSelectGroup = onSelectGroup;
         this.onGestureEnd = onGestureEnd;
+        this.onAddCaption = onAddCaption;
 
         this.viewport = createViewport({ durationSec: 0, viewWidthPx: 0 });
         this.peaks = null;
@@ -321,6 +327,7 @@ export class TimelineView {
         q('btn-tl-zoom-out')?.addEventListener('click', () => this.zoomBy(1 / 1.6));
         q('btn-tl-zoom-fit')?.addEventListener('click', () => this.fit());
         q('btn-tl-zoom-sel')?.addEventListener('click', () => this.zoomToSelected());
+        q('btn-tl-add-caption')?.addEventListener('click', () => this.onAddCaption({ startSec: null }));
         q('btn-tl-collapse')?.addEventListener('click', () => {
             this.collapsed = !this.collapsed;
             this._applyCollapsed();
@@ -585,6 +592,11 @@ export class TimelineView {
                     seek: true,
                     toggle: false,
                 });
+            } else {
+                // Empty lane spot → request a new caption at this time
+                // (Phase 5d). Report only; App.addCaptionAt plans/commits.
+                const t = xToTime(this.viewport, x);
+                if (Number.isFinite(t) && t >= 0) this.onAddCaption({ startSec: t });
             }
         });
 

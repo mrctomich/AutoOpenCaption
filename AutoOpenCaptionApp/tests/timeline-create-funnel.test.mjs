@@ -173,3 +173,54 @@ test('addCaptionAt: no-room rejection surfaces a status note', () => {
     assert.match(fnSrc, /plan\.reason === 'no-room'/);
     assert.match(fnSrc, /Status\.msg\(/);
 });
+
+// ── 5c/5d entry points (toolbar button + empty-lane double-click) ─
+
+const viewSrc = readFileSync(
+    fileURLToPath(new URL('../app/assets/timeline-view.js', import.meta.url)), 'utf8',
+);
+const htmlSrc = readFileSync(
+    fileURLToPath(new URL('../app/index.html', import.meta.url)), 'utf8',
+);
+
+test('5c: toolbar button exists and the view reports, never mutates', () => {
+    assert.match(htmlSrc, /id="btn-tl-add-caption"[^>]*disabled/,
+        'button must start disabled (enabled by rebuildLayout with a transcript)');
+    assert.match(appSrc, /addBtn\.disabled = !this\.transcript;/,
+        'rebuildLayout must gate the button on transcript presence');
+    assert.match(viewSrc, /onAddCaption\s*=\s*\(\)\s*=>\s*\{\}/,
+        'constructor must default onAddCaption to a noop');
+    assert.match(viewSrc,
+        /q\('btn-tl-add-caption'\)\?\.addEventListener\('click', \(\) => this\.onAddCaption\(\{ startSec: null \}\)\)/,
+        'toolbar click must report startSec: null (App resolves the playhead)');
+    // View stays report-only: no mutation primitives in the toolbar bind.
+    const bind = viewSrc.slice(viewSrc.indexOf('_bindToolbar()'),
+        viewSrc.indexOf('_bindResizer()'));
+    assert.ok(!/saveState|splice|addCaptionAt|transcript/.test(bind),
+        'view must not mutate transcript data');
+});
+
+test('5d: empty-lane double-click reports startSec; box dbl-click still selects', () => {
+    const dbl = viewSrc.slice(viewSrc.indexOf("addEventListener('dblclick'"),
+        viewSrc.indexOf('// Keyboard parity'));
+    assert.match(dbl, /this\.onSelectGroup\(\{[\s\S]*?seek: true/,
+        'dbl-click on a box must keep seeking-selection');
+    assert.match(dbl, /const t = xToTime\(this\.viewport, x\);/,
+        'empty spot must resolve the clicked time via xToTime');
+    assert.match(dbl, /Number\.isFinite\(t\) && t >= 0\) this\.onAddCaption\(\{ startSec: t \}\)/);
+    // Report-only again: the dblclick handler must not touch data.
+    assert.ok(!/saveState|splice|transcript/.test(dbl),
+        'dblclick handler must not mutate transcript data');
+    // The add branch is the hit-test ELSE: it only fires when i == null.
+    const ifPos = dbl.indexOf('if (i != null');
+    const elsePos = dbl.indexOf('onAddCaption');
+    assert.ok(ifPos >= 0 && elsePos > ifPos, 'add path must be the no-hit else branch');
+});
+
+test('5c: App routes onAddCaption through addCaptionAt with playhead fallback', () => {
+    assert.match(appSrc,
+        /onAddCaption: \(\{ startSec \} = \{\}\) => this\.addCaptionAt\(\{/,
+        'App must wire the view callback into the single create funnel');
+    assert.match(appSrc, /this\.video\.currentTime/,
+        'fallback must use the playhead');
+});

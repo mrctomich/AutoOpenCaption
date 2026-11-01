@@ -820,6 +820,15 @@ const App = {
                 onSelectGroup: (sel) => this.onTimelineSelectGroup(sel),
                 // Phase 4d: a completed drag commits through the funnel.
                 onGestureEnd: (info) => this.applyTimelineEdit(info),
+                // Phase 5c/5d: toolbar button (startSec null → playhead) and
+                // empty-lane double-click (startSec = time under cursor) both
+                // route through the single create funnel.
+                onAddCaption: ({ startSec } = {}) => this.addCaptionAt({
+                    startSec: Number.isFinite(startSec)
+                        ? startSec
+                        : ((this.video && Number.isFinite(this.video.currentTime))
+                            ? this.video.currentTime : 0),
+                }),
             },
         );
     },
@@ -1000,6 +1009,9 @@ const App = {
             this.captionGroups = groupWords(this.transcript.words, this.style.grouping);
             this.captionLayout = computeLayout(this.captionGroups, this.style, this.canvas.width, this.canvas.height);
         }
+        // 5c: the create-caption button only makes sense with a transcript.
+        const addBtn = document.getElementById('btn-tl-add-caption');
+        if (addBtn) addBtn.disabled = !this.transcript;
         // Caption boxes in the timeline mirror the exported cue boundaries,
         // so every grouping/layout rebuild refreshes the lanes.
         this.timeline?.invalidate();
