@@ -977,3 +977,43 @@ constants `MIN_CAPTION_SEC` (0.1, matches groupWords' emitted-cue floor) /
 **Next sub-phase:** 5b — `App.addCaptionAt()` mutation funnel: one
 `saveState()`, splice plan.word at plan.index, `selectWord(newIndex)`, full
 refresh chain; status note on 'no-room'; undo/redo round-trip of create. STOP.
+
+---
+
+## Phase 5b — App.addCaptionAt() mutation funnel (2026-11-01)
+
+**Shipped:** `App.addCaptionAt({ startSec, endSec, text })` in `app.js`
+(right after `applyTimelineEdit`): `planNewCaption` (5a) plans PURE → on
+`!plan.ok` a status note ('no-room' vs generic) and `return false` with
+ZERO writes and no undo save → else exactly one `saveState()` → `splice
+(plan.index, 0, plan.word)` → `rebuildLayout()` → `selectWord(plan.index,
+{ seek: false })` (covers editor re-render + inspector + timeline highlight;
+creating ≠ navigation) → `renderTranscriptDisplay()` → `updatePreview()` →
+`timeline?.invalidate()`. Status note names the new span (or the shrink).
+`app.js` import line extended to `{ commitProposal, planNewCaption }`.
+
+**Tests:** `tests/timeline-create-funnel.test.mjs` (new, 13): 7 functional
+mirrors of the commit path against the REAL planNewCaption + groupWords
+(sorted insert + unique id + appears in derived cue list; undo/redo stack
+round-trip byte-identical; rejected plan = no save no write; shrunk-gap
+contract; bad-start hard reject; <MIN gap rejected; planned word is
+JSON-serializable) + 6 source-level guards pinning the funnel contract
+(same convention as timeline-commit.test.mjs): one saveState gated on
+plan.ok, splice at plan.index, selectWord seek:false AFTER the splice,
+full refresh chain, no-room status note.
+
+**Failure logged:** first test run 1 fail — MY assertion was wrong, app was
+right (recurring pitfall): `startSec 1.2` with default 1.0 s span SHRINKS
+into the gap [2, 2.2] instead of being rejected, so the "rejected plan"
+mirror's fallback branch compared the wrong slice. Fixed by using a span
+fully inside a live word (1.2–1.5) for the true rejection case and adding a
+separate test for the shrunk-gap contract. Lesson: derive create-plan
+expectations from planNewCaption's shrink rules, never intuition.
+
+**Tests:** `node --test tests/*.test.mjs` = **205 pass, 0 fail** (baseline 192).
+
+**Next sub-phase:** 5c — toolbar "＋ caption at playhead" button (index.html
++ bindTimeline/toolbar wiring → `addCaptionAt(this.video.currentTime)`;
+disabled without a transcript). 5d after that (dbl-click empty lane →
+`onAddCaption({startSec})` view callback — view reports, never mutates).
+STOP after 5d unless context is clearly ample.

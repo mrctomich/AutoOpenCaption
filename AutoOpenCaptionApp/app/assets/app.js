@@ -5,7 +5,7 @@ import { installResumableFetch, isFileCached } from './resumable-fetch.js';
 import { loadCtcAligner, alignCtcTranscript, CtcAlignerError, CTC_MODEL_ID } from './ctc-aligner.js';
 import { applyCtcResult, revertCtcResult, canCtcRealign } from './ctc-apply.js';
 import { TimelineView } from './timeline-view.js';
-import { commitProposal } from './timeline-model.js';
+import { commitProposal, planNewCaption } from './timeline-model.js';
 import { createPeakBuilder } from './waveform.js';
 
 const waitForTransformers = () => new Promise((resolve) => {
@@ -857,6 +857,45 @@ const App = {
         this.timeline?.invalidate();
         if (this.captionGroups.length !== groupsBefore) {
             Status.msg(`Timing change regrouped captions: ${groupsBefore} → ${this.captionGroups.length} groups.`);
+        }
+        return true;
+    },
+
+    /**
+     * Create a user caption through the same funnel discipline (Phase 5b).
+     * planNewCaption() plans it PURE (unique max(id)+1 id, clamps, shrink
+     * into the live gap, sorted insert index); the plan commits behind
+     * exactly one saveState(), so creates round-trip through the standard
+     * undo/redo stack. The new word is user data from birth (userAdjusted,
+     * orig* = its own span) — CTC realign never moves it.
+     * Returns true on commit, false on rejection (no data touched).
+     */
+    addCaptionAt({ startSec, endSec, text = '' } = {}) {
+        if (!this.transcript) return false;
+        const durationSec = (this.video && Number.isFinite(this.video.duration))
+            ? this.video.duration : undefined;
+        const plan = planNewCaption({
+            words: this.transcript.words, startSec, endSec, text, durationSec,
+        });
+        if (!plan.ok) {
+            Status.msg(plan.reason === 'no-room'
+                ? 'No room for a caption there — it would overlap a word.'
+                : 'Could not create a caption there.');
+            return false;
+        }
+        this.saveState();
+        this.transcript.words.splice(plan.index, 0, plan.word);
+        this.rebuildLayout();            // also timeline.invalidate() (lanes)
+        // selectWord covers editor re-render, inspector, and the timeline
+        // highlight; seek:false — creating a caption is not navigation.
+        this.selectWord(plan.index, { seek: false });
+        this.renderTranscriptDisplay();
+        this.updatePreview();
+        this.timeline?.invalidate();
+        if (plan.shrunk) {
+            Status.msg('Caption shortened to fit the gap between words.');
+        } else {
+            Status.msg(`Caption created at ${plan.word.start.toFixed(2)}–${plan.word.end.toFixed(2)} s.`);
         }
         return true;
     },
