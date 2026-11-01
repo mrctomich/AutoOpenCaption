@@ -49,20 +49,27 @@ test('applyCtcResult: ctc words get new timing, marks and cleared estimated flag
     assert.equal(w0.origEnd, 1.31);
 });
 
-test('applyCtcResult: estimated/unalignable words keep their CURRENT app timing untouched', () => {
+test('applyCtcResult: kept estimates keep current timing; user-drifted kept word never moved', () => {
     const words = makeWords();
-    // Simulate a user timestamp edit after transcription.
+    // Simulate a user timestamp edit after transcription (drift from the
+    // orig baseline makes words[1] user-adjusted → untouchable).
     words[1].start = 1.62;
     words[1].end = 2.11;
-    applyCtcResult(words, makeResult());
+    const out = applyCtcResult(words, makeResult());
 
     assert.equal(words[1].start, 1.62); // NOT overwritten by result value
     assert.equal(words[1].end, 2.11);
     assert.equal(words[1].ctcAligned, false);
     assert.equal(words[1].ctcReason, 'low-confidence');
 
-    assert.equal(words[2].start, 2.10);
+    // words[2] is a KEPT MACHINE estimate (not user-adjusted) starting at
+    // 2.10 — before the previous word's end (2.11) — so the monotonicity
+    // guard clamps it forward to 2.11 (end 2.30 stays).
+    assert.equal(words[2].start, 2.11);
+    assert.equal(words[2].end, 2.30);
     assert.equal(words[2].ctcReason, 'unsupported-characters');
+    assert.equal(out.keptClamped, 1);
+    assert.equal(out.backwardConflicts, 0);
 });
 
 test('applyCtcResult: end is always > start (degenerate span guard)', () => {
@@ -297,10 +304,11 @@ test('helpers: isUserAdjustedTiming / invalidTimingReason edge cases', () => {
 
 // ── MONOTONICITY GUARD (Phase 4 follow-up) ──────────────────────────
 // Realign output mixes fresh CTC spans with kept Whisper estimates, so a
-// CTC word can be stamped before the previous word ended. That created
+// word can be stamped before the previous word ended. That created
 // overlapping caption groups (second packed timeline lane + overlapping
-// SRT cues). applyCtcResult now clamps CTC starts forward; untouchable
-// words (kept/user timings) are only counted, never moved.
+// SRT cues). applyCtcResult clamps CTC spans AND kept machine estimates
+// forward; only user-ADJUSTED timings are never moved (reported as
+// backwardConflicts).
 
 function seamWords() {
     return [
@@ -359,7 +367,7 @@ test('monotonicity: kept estimate with a late end pushes the following CTC word 
     assert.equal(out.backwardConflicts, 0);
 });
 
-test('monotonicity: backward jump from an untouchable word is reported, never repaired', () => {
+test('monotonicity: backward jump of a kept MACHINE estimate is repaired forward', () => {
     const words = [
         { id: 'a', text: 'FIRST', start: 5.00, end: 6.00, userAdjusted: true, origStart: 5.00, origEnd: 6.00 },
         { id: 'b', text: 'SECOND', start: 2.00, end: 2.50, origStart: 2.00, origEnd: 2.50 },
@@ -375,10 +383,36 @@ test('monotonicity: backward jump from an untouchable word is reported, never re
     };
     const out = applyCtcResult(words, result, { skipUserAdjusted: true });
     assert.equal(words[0].start, 5.00);  // user-adjusted word untouched
-    assert.equal(words[1].start, 2.00);  // kept estimate untouched
-    assert.equal(out.backwardConflicts, 1); // the backward kept word is reported
-    // the later CTC word is still pushed past the running max end (6.00)
+    assert.equal(words[1].start, 6.00);  // kept machine estimate clamped to prevEnd
+    assert.ok(words[1].end > words[1].start); // degenerate end follows
+    assert.equal(words[1].origStart, 6.00);   // baseline re-anchored (not "user edited")
+    assert.equal(out.backwardConflicts, 0);
+    assert.equal(out.keptClamped, 1);
+    // the later CTC word is still past the running max end (6.00)
     assert.equal(words[2].start, 6.80);  // already past 6.00, no clamp needed
+    assert.equal(out.monotonicClamped, 0);
+});
+
+test('monotonicity: backward jump from a USER-ADJUSTED word is reported, never repaired', () => {
+    const words = [
+        { id: 'a', text: 'FIRST', start: 5.00, end: 6.00, userAdjusted: true, origStart: 5.00, origEnd: 6.00 },
+        { id: 'b', text: 'SECOND', start: 2.00, end: 2.50, userAdjusted: true, origStart: 2.00, origEnd: 2.50 },
+        { id: 'c', text: 'THIRD', start: 7.00, end: 7.50, origStart: 7.00, origEnd: 7.50 },
+    ];
+    const result = {
+        words: [
+            { id: 'a', text: 'FIRST', start: 5.00, end: 6.00, alignment: 'ctc' },       // user-guarded
+            { id: 'b', text: 'SECOND', start: 2.00, end: 2.50, alignment: 'estimated' }, // user-adjusted, backwards
+            { id: 'c', text: 'THIRD', start: 6.80, end: 7.50, alignment: 'ctc' },
+        ],
+        unalignable: [{ index: 1, text: 'SECOND', reason: 'low-confidence', chars: [] }],
+    };
+    const out = applyCtcResult(words, result, { skipUserAdjusted: true });
+    assert.equal(words[1].start, 2.00);  // user-adjusted: untouched
+    assert.equal(words[1].end, 2.50);
+    assert.equal(out.backwardConflicts, 1); // reported, not repaired
+    assert.equal(out.keptClamped, 0);
+    assert.equal(words[2].start, 6.80);  // still past running max end 6.00
     assert.equal(out.monotonicClamped, 0);
 });
 

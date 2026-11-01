@@ -1330,10 +1330,12 @@ const App = {
             let msg = `Realigned ${applied.aligned} of ${applied.aligned + applied.kept} word timings (experimental)`;
             if (skipped) msg += ` — ${skipped} kept their timing (no CTC evidence)`;
             if (applied.skippedUserAdjusted) msg += `, ${applied.skippedUserAdjusted} kept your manual timing`;
-            if (applied.monotonicClamped) msg += `, ${applied.monotonicClamped} shifted forward to keep word order`;
+            if (applied.monotonicClamped + applied.keptClamped) {
+                msg += `, ${applied.monotonicClamped + applied.keptClamped} shifted forward to keep word order`;
+            }
             Status.success(msg);
             if (applied.backwardConflicts) {
-                Status.warning(`${applied.backwardConflicts} kept timing${applied.backwardConflicts === 1 ? '' : 's'} overlap neighbouring words — captions may still overlap there; check the flagged words in the inspector.`);
+                Status.warning(`${applied.backwardConflicts} manually adjusted timing${applied.backwardConflicts === 1 ? '' : 's'} overlap neighbouring words — captions may still overlap there; check the flagged words in the inspector.`);
             }
             if (applied.flaggedInvalid) {
                 Status.warning(`${applied.flaggedInvalid} manually adjusted word ${applied.flaggedInvalid === 1 ? 'timing looks' : 'timings look'} invalid (negative, reversed, or beyond the audio) — kept unchanged, please fix them in the inspector.`);
@@ -1807,7 +1809,10 @@ const App = {
         if (!this.captionGroups.length) return '';
         return this.captionGroups.map((group, i) => {
             const start = this.formatSRTTime(group.start);
-            const end = this.formatSRTTime(Math.max(group.end, group.start + 0.1));
+            // group.end is already min-duration-guaranteed AND overlap-clamped
+            // by groupWords(); re-applying the +0.1 minimum here would undo
+            // that clamp and re-export overlapping cues (the maxWords=1 bug).
+            const end = this.formatSRTTime(group.end);
             const text = group.words.map(w => w.text).join(' ');
             return `${i + 1}\n${start} --> ${end}\n${text}`;
         }).join('\n\n');
@@ -1817,7 +1822,9 @@ const App = {
         if (!this.captionGroups.length) return 'WEBVTT\n\n';
         const cues = this.captionGroups.map(group => {
             const start = this.formatVTTTime(group.start);
-            const end = this.formatVTTTime(Math.max(group.end, group.start + 0.1));
+            // See generateSRT: never re-inflate the minimum duration past the
+            // overlap clamp groupWords already applied.
+            const end = this.formatVTTTime(group.end);
             const text = group.words.map(w => w.text).join(' ');
             return `${start} --> ${end}\n${text}`;
         }).join('\n\n');

@@ -26,14 +26,17 @@
  *    red-flag, and the origStart/origEnd "adjusted" baseline.
  *  - MONOTONICITY GUARD (Phase 4 follow-up): the aligner output mixes fresh
  *    CTC spans with kept Whisper estimates, so the word stream can go
- *    backwards in time at the seams (a CTC word stamped before the previous
+ *    backwards in time at the seams (a word stamped before the previous
  *    word's end). That made caption groups overlap, which the timeline
  *    surfaced as a second packed lane and which leaked into SRT/VTT export.
- *    A forward pass now clamps every CTC word's start to the running max of
- *    all previous word ends (end follows if needed) — words we are allowed
- *    to move. Untouchable words (kept estimates, user-adjusted, flagged
- *    invalid) are NEVER moved; a backward jump caused by one of those is
- *    only counted (`backwardConflicts`) so the UI can report it.
+ *    A forward pass clamps every accepted start to the running max of all
+ *    previous word ends (end follows if needed). This covers CTC spans AND
+ *    kept machine estimates — kept timings are Whisper guesses, not user
+ *    data; leaving them in place exported the overlaps the user sees at
+ *    maxWords=1 (digits like "2015," are always kept: CTC vocab gap). The
+ *    one exception: timings the USER adjusted are NEVER moved; a backward
+ *    jump caused by one of those is only counted (`backwardConflicts`) so
+ *    the UI can report it.
  *  - Text is never touched. Words created after the realign (split/merge)
  *    are ignored by revert — they have no snapshot entry.
  */
@@ -93,7 +96,10 @@ export function invalidTimingReason(word, duration) {
  *                           "user adjusted" (userAdjusted keeps its own
  *                           green marker through the flag).
  * Marks set on kept words:  ctcAligned = false, ctcReason = why the aligner
- *                           skipped it (from result.unalignable).
+ *                           skipped it (from result.unalignable). Kept
+ *                           machine timings are still clamped forward at the
+ *                           seam (keptClamped); user-adjusted timings are
+ *                           never moved (backwardConflicts reports them).
  *
  * @param {Array<{id:*, text:string, start:number, end:number}>} words  live transcript words (mutated)
  * @param {{words: Array, unalignable: Array}} result  alignCtcTranscript() result
@@ -103,7 +109,8 @@ export function invalidTimingReason(word, duration) {
  *        decoded audio, enables the out-of-range validity check.
  * @returns {{snapshot: Array, aligned: number, kept: number, changed: number,
  *            skippedUserAdjusted: number, flaggedInvalid: number,
- *            monotonicClamped: number, backwardConflicts: number}}
+ *            monotonicClamped: number, keptClamped: number,
+ *            backwardConflicts: number}}
  * @throws if result.words does not line up 1:1 (length and id order) with words
  */
 export function applyCtcResult(words, result, options = {}) {
@@ -120,7 +127,7 @@ export function applyCtcResult(words, result, options = {}) {
 
     const snapshot = [];
     let aligned = 0, kept = 0, changed = 0, skippedUserAdjusted = 0, flaggedInvalid = 0;
-    let monotonicClamped = 0, backwardConflicts = 0;
+    let monotonicClamped = 0, keptClamped = 0, backwardConflicts = 0;
     // Running max of every processed word's end (finite values only). Used to
     // keep CTC timings chronological; see MONOTONICITY GUARD in the header.
     let prevEnd = -Infinity;
@@ -175,19 +182,36 @@ export function applyCtcResult(words, result, options = {}) {
             aligned++;
             if (Number.isFinite(end) && end > prevEnd) prevEnd = end;
         } else {
-            // "estimated"/"unalignable": keep the current app timing untouched,
-            // record why the aligner had no evidence for this word.
+            // "estimated"/"unalignable": keep the current app timing, record
+            // why the aligner had no evidence for this word. Kept timings are
+            // machine guesses — clamp them forward too so realign output is
+            // always monotonic (otherwise they export as overlapping cues and
+            // pack a second timeline lane). Only user-edited timings are
+            // untouchable; a backward jump from one of those is reported.
             w.ctcAligned = false;
             w.ctcReason = reasonById.get(id) || 'no-ctc-evidence';
             kept++;
-            // Untouchable: a backward jump here is reported, never repaired.
-            if (Number.isFinite(w.start) && w.start < prevEnd) backwardConflicts++;
+            if (Number.isFinite(w.start) && w.start < prevEnd) {
+                if (skipUserAdjusted && isUserAdjustedTiming(w)) {
+                    backwardConflicts++;
+                } else {
+                    w.start = prevEnd;
+                    if (!Number.isFinite(w.end) || w.end < w.start) w.end = w.start + 1e-6;
+                    // Re-anchor the "adjusted" baseline so the nudge never
+                    // looks like a user edit later; ctcReason keeps the red
+                    // needs-review flag. Revert restores from the snapshot.
+                    w.origStart = w.start;
+                    w.origEnd = w.end;
+                    keptClamped++;
+                    changed++;
+                }
+            }
             if (Number.isFinite(w.end) && w.end > prevEnd) prevEnd = w.end;
         }
     });
 
     return { snapshot, aligned, kept, changed, skippedUserAdjusted, flaggedInvalid,
-             monotonicClamped, backwardConflicts };
+             monotonicClamped, keptClamped, backwardConflicts };
 }
 
 /**
