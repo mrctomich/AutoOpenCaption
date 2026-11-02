@@ -1149,3 +1149,59 @@ replacing hooks).
 mixed gestures, unique-id audit, export reflection, F2 text edit on a fresh
 word), docs closeout, push, PR #13 update. STOP after 5f — do NOT merge
 before the user's word.
+
+---
+
+## Phase 5f — browser QA + Phase 5 closeout: COMPLETE (2026-11-01)
+
+**QA script:** `scripts/tl_phase5_qa.cjs` (playwright-core headless Chrome,
+pattern of `tl_phase4e_qa.cjs`: local file server + clip served at
+`/tl_clip_60.mp4`, `SCRATCH`/`NODE_PATH` as native `C:/` paths, stdin
+`</dev/null`). Instrumentation wraps `App.addCaptionAt`/`App.saveState` as
+counting pass-throughs — hooks are never replaced (4d lesson preserved).
+
+**Run:** from the QA env dir:
+`SCRATCH='C:/Users/<user>/AppData/Local/Temp/pw4c' NODE_PATH='<same>/node_modules' node scripts/tl_phase5_qa.cjs </dev/null`
+
+**Scenarios — 30/30 PASS, zero page errors:**
+- **S0** gating: `#btn-tl-add-caption` disabled without transcript, enabled with one.
+- **S1** button create: playhead 20.4 → word 20.4–21.4, exactly one funnel
+  create + one save; new word is user data from birth (`userAdjusted:true`,
+  `estimated:false`, `orig*` = own span); new word selected, playhead unmoved.
+- **S2** dbl-click: empty-lane dbl-click at 11.0 s creates at cursor time
+  (±1 px); dbl-click on an existing box still selects + seeks and creates
+  nothing; no-room position → `false`, zero words, zero saves.
+- **S3** rapid mixed gestures create→drag→F2-edit: one save each; staged LIFO
+  undo unwinds exactly one gesture per press (full state-string diff against
+  snapshots); redo ×3 restores; Escape in F2 edit cancels with zero saves.
+- **S4** unique-id audit: seeded date-style `w251031` + non-numeric `x9`;
+  three creates → `w251032/33/34`, all 7 ids unique.
+- **S5** export reflection: fresh EMPTY caption is a real cue with an empty
+  text line; typed text appears in SRT; SRT/VTT cue-text parity via shared
+  `joinWordTexts`; no double/leading spaces; display pane reflects edits.
+
+**Two real bugs found by the QA run and fixed (app.js):**
+1. `enterTextEdit` blur-commit called `rebuildLayout` → `updatePreview` but
+   NOT `renderTranscriptDisplay()` — the transcript display pane kept stale
+   text after an F2 edit until some unrelated refresh.
+2. Inspector `#inspector-text` change handler: same missing
+   `renderTranscriptDisplay()`.
+Both commit paths now run the full chain; the two source-guard tests in
+`tests/timeline-edit-text.test.mjs` were tightened to require the call
+(the inspector guard now scopes to the text handler itself).
+
+**Test baseline:** `node --test tests/*.test.mjs` = **229 pass, 0 fail**.
+
+## Phase 5 complete — as-built summary (2026-11-01)
+
+Create-caption UX (Q4) shipped as both entries: toolbar button (playhead)
+and empty-lane dbl-click (cursor time), through one funnel
+(`App.addCaptionAt` → `planNewCaption`) with one save per create, standard
+undo/redo, id allocation covering `w<date6>` suffixes, user-created words
+CTC-protected from birth, and full editor/preview/display/SRT/VTT
+reflection. P5 acceptance criteria met.
+
+**State:** Phase 5 = 5a (`planNewCaption`), 5b (funnel), 5c+5d (entry
+points), 5e (fresh-caption editability + display-refresh fixes), 5f (QA +
+closeout). PR #13 pushed, NOT merged — awaiting the user's word +
+real-ASR dogfood (Phase 6 plan: full-workflow regression pass).

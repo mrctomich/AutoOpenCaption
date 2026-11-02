@@ -355,7 +355,7 @@ test('app.js: enterTextEdit edits by index and commits the trimmed text', () => 
     assert.match(fn, /this\.transcript\.words\[index\]\.text = newText;/);
     assert.equal((fn.match(/this\.saveState\(\)/g) || []).length, 1,
         'exactly one undo save per text commit');
-    for (const call of ['rebuildLayout()', 'updatePreview()', 'updateInspector()']) {
+    for (const call of ['rebuildLayout()', 'renderTranscriptDisplay()', 'updatePreview()', 'updateInspector()']) {
         assert.ok(fn.includes(call), `commit must call ${call}`);
     }
     // Escape cancels without writing.
@@ -384,8 +384,8 @@ test('app.js: inspector text field writes the trimmed value by selected index', 
         fn.indexOf("textInput.addEventListener('keydown'"));
     assert.equal((textHandler.match(/this\.saveState\(\)/g) || []).length, 1,
         'inspector text change: exactly one undo save');
-    for (const call of ['rebuildLayout()', 'renderTranscriptEditor()', 'updatePreview()']) {
-        assert.ok(fn.includes(call), `inspector commit must call ${call}`);
+    for (const call of ['rebuildLayout()', 'renderTranscriptEditor()', 'renderTranscriptDisplay()', 'updatePreview()']) {
+        assert.ok(textHandler.includes(call), `inspector text commit must call ${call}`);
     }
 });
 

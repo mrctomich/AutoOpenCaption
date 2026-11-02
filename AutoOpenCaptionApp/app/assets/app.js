@@ -2358,6 +2358,7 @@ const App = {
                     this.saveState();
                     this.transcript.words[index].text = newText;
                     this.rebuildLayout();
+                    this.renderTranscriptDisplay();
                     this.updatePreview();
                 }
             }
@@ -2430,6 +2431,7 @@ const App = {
             this.transcript.words[this.selectedWordIndex].text = e.target.value.trim();
             this.rebuildLayout();
             this.renderTranscriptEditor();
+            this.renderTranscriptDisplay();
             this.updatePreview();
         });
         
