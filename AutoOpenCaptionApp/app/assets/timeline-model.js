@@ -85,6 +85,29 @@ export function zoomAtAnchor(vp, anchorX, factor) {
     return next;
 }
 
+/**
+ * Zoom on a TIME (playhead zoom), centered as much as possible:
+ *  - zoom IN:  after the zoom the time sits at the view center, or as close
+ *    as edge clamping allows (playhead near t=0 / video end stays put).
+ *  - zoom OUT: the time keeps its current pixel (pin, don't slide the view
+ *    sideways while content shrinks).
+ * Off-screen times are scrolled in first. Ctrl+wheel keeps the raw
+ * cursor-pixel zoomAtAnchor instead.
+ */
+export function zoomAtTime(vp, tSec, factor) {
+    const t = Number.isFinite(tSec) ? tSec : 0;
+    if (factor > 1) {
+        const newPps = clampPps(vp, vp.pps * factor);
+        if (newPps === vp.pps) return { ...vp };
+        const next = { ...vp, pps: newPps,
+                       viewStartSec: t - (vp.viewWidthPx / 2) / newPps };
+        next.viewStartSec = clampViewStart(next, next.viewStartSec);
+        return next;
+    }
+    const scrolled = scrollToTime(vp, t);
+    return zoomAtAnchor(scrolled, timeToX(scrolled, t), factor);
+}
+
 /** Pan by a pixel delta (drag-right moves the window left in time). */
 export function panByPixels(vp, dxPx) {
     const next = { ...vp, viewStartSec: vp.viewStartSec - dxPx / (vp.pps || 1) };

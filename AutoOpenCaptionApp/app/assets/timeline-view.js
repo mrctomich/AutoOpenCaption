@@ -12,6 +12,7 @@
  * Interaction map (design doc):
  *   wheel                → horizontal scroll
  *   ctrl+wheel           → zoom at cursor
+ *   zoom buttons / +/-   → zoom at playhead (zoom-in centers it)
  *   drag ruler           → pan
  *   click ruler          → seek
  *   drag waveform        → scrub (continuous seek)
@@ -31,7 +32,7 @@
  */
 
 import {
-    createViewport, zoomAtAnchor, panByPixels, fitViewport, scrollToTime,
+    createViewport, zoomAtAnchor, zoomAtTime, panByPixels, fitViewport, scrollToTime,
     timeToX, xToTime, pickRulerStep, rulerTicks, formatRulerTime,
     groupBoxes, packLanes, hitTestBoxes, frameSpan, MIN_BOX_PX, boxRect,
     grabZone, editBounds, editBoundsForGroup, clampDelta, resolveGesture,
@@ -257,9 +258,13 @@ export class TimelineView {
         this.invalidate();
     }
 
+    /** Zoom anchored on an explicit pixel, else on the playhead. */
     zoomBy(factor, anchorX = null) {
-        const ax = anchorX === null ? this._cssWidth() / 2 : anchorX;
-        this.viewport = zoomAtAnchor(this.viewport, ax, factor);
+        if (anchorX === null) {
+            this.viewport = zoomAtTime(this.viewport, this.playheadTime, factor);
+        } else {
+            this.viewport = zoomAtAnchor(this.viewport, anchorX, factor);
+        }
         this.invalidate();
     }
 
@@ -278,8 +283,6 @@ export class TimelineView {
     }
 
     // ── Internals ───────────────────────────────────────────────
-
-    _cssWidth() { return this.canvas.clientWidth || 0; }
 
     _measure() {
         const dpr = window.devicePixelRatio || 1;
