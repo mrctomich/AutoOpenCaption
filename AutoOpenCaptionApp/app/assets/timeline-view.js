@@ -470,6 +470,13 @@ export class TimelineView {
         c.addEventListener('pointerdown', (e) => {
             if (this.viewport.durationSec <= 0) return;
             e.preventDefault();
+            // preventDefault suppresses the browser's native focus change,
+            // which would leave focus trapped in a previously focused text
+            // input / contentEditable chip (committing it via blur) and
+            // silently disable every global keyboard shortcut. Take focus
+            // ourselves: the canvas is focusable (tabindex) and the global
+            // handler treats it as non-editing, so shortcuts keep working.
+            c.focus({ preventScroll: true });
             c.setPointerCapture(e.pointerId);
             const r = c.getBoundingClientRect();
             const x = e.clientX - r.left;
