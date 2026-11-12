@@ -228,19 +228,26 @@ const ok = (name, cond, extra='') => { out.push((cond?'PASS':'FAIL') + ' | ' + n
   ok('overlapping cues pack into separate lanes',
      laneInfo.laneOf.join(',') === '0,1,0', JSON.stringify(laneInfo));
 
-  // 5c) zero-duration cue renders as MIN_BOX_PX sliver when zoomed out
+  // 5c) zero-duration cue renders as MIN_BOX_PX sliver when zoomed out.
+  // Look the box up BY INDEX (lane packing reserves a trailing lane for
+  // invalid cues, so _laneBoxes is no longer ordered by group index — the
+  // old positional _laneBoxes[gi] sampled a neighbour's widened sliver).
+  // Semantics since the lane-packing fix: groupWords() normalises a collapsed
+  // cue to its +0.1 s minimum span, so the derived group is VALID and the box
+  // is `widened` to MIN_BOX_PX; `degenerate` is reserved for truly broken
+  // (NaN/inverted) time spans.
   const sliver = await page.evaluate(() => {
     const tl = App.timeline;
     tl.viewport.pps = 15;
     tl._refreshLanes(tl.canvas.clientHeight);
     const zi = App.captionGroups.findIndex(g => g.words.some(w => w.id === 'w5'));
-    const b = tl._laneBoxes[zi];
-    const res = b ? { w: b.w, deg: b.degenerate } : null;
+    const b = tl._laneBoxes.find(b => b.index === zi);
+    const res = b ? { w: b.w, deg: b.degenerate, wid: b.widened } : null;
     tl.fit();
     return res;
   });
   ok('zero-duration cue renders MIN_BOX_PX sliver',
-     sliver && sliver.deg === true && Math.abs(sliver.w - 4) < 0.01, JSON.stringify(sliver));
+     sliver && sliver.deg === false && sliver.wid === true && Math.abs(sliver.w - 4) < 0.01, JSON.stringify(sliver));
 
   // 6) stored times never modified by selection interactions
   const times = await page.evaluate(() => App.transcript.words.map(w => [w.start, w.end]).flat().join(','));

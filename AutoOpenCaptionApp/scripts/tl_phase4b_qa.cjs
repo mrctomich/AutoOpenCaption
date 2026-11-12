@@ -110,7 +110,12 @@ const ok = (name, cond, extra='') => { out.push((cond?'PASS':'FAIL') + ' | ' + n
     const b = window.__box0();
     return { colors: window.__colorsIn(b.x + 4, b.cy - 5, b.w - 8, 10), w: b.w, wi: b.wordIndex };
   });
-  ok('sub-boxes OFF below WORD_SUB_PPS', lowZoom.colors === 1, `colors=${lowZoom.colors} @80pps`);
+  // Since Phase 5e group LABELS render whenever b.w >= 28 (pps-independent,
+  // latent-bug fix), so one text color inside the box at 80 pps is expected.
+  // What must stay OFF below WORD_SUB_PPS are the per-WORD sub-box outlines —
+  // with them on, colors jump (the hi-zoom assertion below proves the ON
+  // side); fill + label text alone therefore bound the OFF side at <= 2.
+  ok('sub-boxes OFF below WORD_SUB_PPS (fill+label only)', lowZoom.colors <= 2, `colors=${lowZoom.colors} @80pps`);
   ok('sub-boxes ON at pps>=120 (outlines+text)', hiZoom.colors >= 3 && hiZoom.colors > lowZoom.colors, `colors=${hiZoom.colors} @200pps vs ${lowZoom.colors} @80pps`);
   ok('groupBoxes wordIndex maps group words to transcript indices', JSON.stringify(hiZoom.wi) === '[0,1]', JSON.stringify(hiZoom.wi));
 

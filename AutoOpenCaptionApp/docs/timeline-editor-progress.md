@@ -1205,3 +1205,105 @@ reflection. P5 acceptance criteria met.
 points), 5e (fresh-caption editability + display-refresh fixes), 5f (QA +
 closeout). PR #13 pushed, NOT merged — awaiting the user's word +
 real-ASR dogfood (Phase 6 plan: full-workflow regression pass).
+
+---
+
+## Phase 6 — Full-workflow regression pass: COMPLETE (2026-11-12)
+
+**Script:** `scripts/tl_phase6_workflow_qa.cjs` (playwright-core headless
+Chrome; same server/hook pattern as 5f — counting pass-through on
+`App.saveState`, hooks never replaced). Purpose-built speech asset:
+`tl_clip_speech.mp4` in the QA scratch dir — 8.7 s, testsrc2 video +
+Windows-SAPI TTS speech ("The quick brown fox… caption timing check.",
+1 s lead silence), h264/aac, generated with local ffmpeg.
+
+**Run:** from the QA env dir, set `SCRATCH` + `NODE_PATH` to the C:/ paths
+(clip `tl_clip_speech.mp4` next to `tl_clip_60.mp4`). NOTE: run it detached
+(PowerShell `Start-Process node … -RedirectStandardOutput`) — this machine's
+agent background shell cannot spawn node.exe with redirected stdio
+("stdin/stdout is not a tty").
+
+**Result — 32/32 PASS, zero page errors (2 runs).** All real pipeline:
+- **S0 gating** — buttons gated before video/transcript.
+- **S1 REAL transcription** — bundled whisper-base (136 MB local ONNX),
+  ffmpeg.wasm audio extraction, 15/15 expected words in 53 s, orig*
+  snapshots on every word, sane monotone timestamps, `_audioCache`
+  populated with the same file, editor chips + SRT cues render (5 grouped
+  cues for 15 words).
+- **S2 estimated-flag flow** — forced-estimated word shows
+  `needs-attention`; inspector nudge +0.05 s → one save, chip flips to
+  `adjusted` (green beats attention).
+- **S3 REAL CTC realign + revert** — ~91 MB wav2vec2 q8 download,
+  `Realigned 13 of 15 — 2 kept (no CTC evidence)`; manually adjusted word
+  preserved byte-exact, order monotone, re-timed words' `estimated`
+  cleared; revert restores the full pre-realign state (timings + flags +
+  snapshot cleared). The `env.allowRemoteModels=false` interaction worry
+  was unfounded: realign works after a bundled local-model transcription.
+- **S4 styling + presets** — live style update; preset save (prompt dialog
+  answered by harness) → load roundtrip restores values; export JSON has
+  name/font/effects/grouping.
+- **S5 create funnel on real transcript** — playhead parked in a real gap
+  (0.05 s; default 1.0 s caption next to a word at 0.8 s is a legitimate
+  no-room reject, first harness pass proved it); +1 word, one save.
+- **S6 REAL burn-in export** — ffmpeg.wasm encode, download captured,
+  verified EXTERNALLY: ffprobe duration 8.744 s exact + h264/aac streams
+  (audio copy); frame PSNR vs source at same timestamps = 43.6 dB in the
+  caption-free region vs 21.4 dB inside speech → captions demonstrably
+  burned in, non-caption frames untouched.
+- **S7 cancel on 60 s media** — export cancelled mid-render, status
+  reported, FFmpeg worker re-initialises, no download leaked.
+
+**Harness lessons (all failures were harness-side, zero app bugs found):**
+1. `statusMsgs` is a Node variable — referencing it inside
+   `page.waitForFunction` throws on the first poll and leaks as PAGEERROR.
+   Poll Node-side (`waitStatus()` helper).
+2. QA test servers must answer HEAD with real `Content-Length` —
+   `probeModelLocal` treats 0/missing as "not bundled" and silently
+   re-downloads the whole 136 MB model (and the renderer then OOM-crashed
+   at default heap; launch Chrome with
+   `--js-flags=--max-old-space-size=6144`).
+3. Export frame-diffs must sample before the earliest caption that exists
+   AT EXPORT TIME — a caption created by the S5 funnel at 0.05 s made the
+   t=0.4 s "silent" sample legitimately differ.
+
+## Phase 6 — cross-phase regression sweep + stale-assertion fixes
+
+All 8 prior browser suites re-run against this branch's HEAD
+(`p6_sweep.bat` pattern; regenerate scratch clips if aged out:
+`tl_clip.mp4` = 12 s testsrc+sine, `tl_clip_60.mp4` = 60 s, both
+640×360@10 h264/aac via ffmpeg lavfi; `tl_phase3_qa.mjs` needs a `.cjs`
+copy to run since it uses require()).
+
+- phase4c 19/19, 4d 20/20, 4e 30/30, 4f 9/9, lanes 8/8, phase5 30/30 — green.
+- Two STALE expectations fixed (app behavior is the intended post-fix
+  semantics; see lane-packing fix + 5e label bug-fix):
+  - `tl_phase3_qa.mjs` 5c: looked `_laneBoxes[zi]` up positionally —
+    invalid-cue lane reservation no longer keeps boxes in group-index
+    order, so it sampled a neighbour. Now `.find(b => b.index === zi)`
+    and asserts `widened && !degenerate` (groupWords normalises a
+    collapsed cue to +0.1 s → valid span widened to MIN_BOX_PX;
+    `degenerate` is reserved for NaN/inverted spans).
+  - `tl_phase4b_qa.cjs`: expected 1 color inside a low-zoom box, but 5e
+    fixed labels (never rendered before) → fill + label text = 2 colors
+    is correct; sub-box outlines stay gated at WORD_SUB_PPS (assertion
+    now `colors <= 2`, hi-zoom ON-check unchanged proves the gate).
+- After fixes: phase3 15/15, phase4b 25/25.
+
+**Unit baseline unchanged:** 229 pass, 0 fail. No app-code changes in
+Phase 6 — the pass found no app regressions; all three script edits above
+are test-harness corrections.
+
+## Phase 6 limitations (documented, P6 acceptance criteria otherwise met)
+
+1. Real Whisper run in QA uses the bundled `base` model on clean TTS
+   speech — the user's own dogfood with `large-v3-turbo` on real footage
+   remains the human acceptance step (clean TTS exercised 0 repaired
+   timestamps; the repaired/estimated paths are covered by the sanitize
+   unit suite + forced-flag browser check).
+2. Burn-in check is PSNR-based evidence (caption window differs strongly,
+   silent window matches source), not OCR of the burned text.
+3. Long-media check is the 60 s clip cancel path; no full multi-minute
+   encode in CI (wasm encode time).
+
+**State:** Phases 1–6 COMPLETE. PR #13 pushed with the Phase 6 closeout,
+NOT merged — awaiting the user's word.
