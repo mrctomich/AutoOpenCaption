@@ -305,7 +305,7 @@ export class TimelineView {
             muted: v('--text-muted', '#8c94a3'),
             text: v('--text-primary', '#14171f'),
             accent: v('--accent', '#7c3aed'),
-            danger: v('--danger', '#dc2626'),
+            danger: v('--danger', '#a16207'),
         };
     }
 

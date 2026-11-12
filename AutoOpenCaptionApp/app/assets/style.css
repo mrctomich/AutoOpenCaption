@@ -25,7 +25,10 @@
     --on-accent: #FFFFFF;
 
     --success: #16A34A;
-    --danger: #DC2626;
+    /* Danger/attention colour is amber-yellow, not red: the app pairs it
+       with --success green, which red/green colour-blind users cannot
+       tell apart. Amber-700 keeps AA text contrast on light surfaces. */
+    --danger: #A16207;
 
     --space-1: 8px;
     --space-2: 16px;
@@ -58,7 +61,7 @@
     --on-accent: #14171F;
 
     --success: #4ADE80;
-    --danger: #F87171;
+    --danger: #FACC15;
 }
 
 body {
@@ -767,7 +770,7 @@ main {
 .word-chip.deleted { opacity: 0.4; text-decoration: line-through; }
 
 /* Timestamp attention outlines in the Word Editor (colours follow the
-transcription Cancel button's red). needs-attention = estimated/missing
+transcription Cancel button's amber-yellow). needs-attention = estimated/missing
 timestamp the user hasn't touched yet; adjusted = text/start/end/split/
 merge changed from the original transcript. Listed after .selected so
 the status colour wins the border; selection still shows via the

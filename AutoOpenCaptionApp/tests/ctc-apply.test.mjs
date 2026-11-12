@@ -103,7 +103,7 @@ test('revertCtcResult: full restore of timing, estimated flag and orig baseline'
     assert.equal(n, 3);
     assert.equal(words[0].start, before[0].start);
     assert.equal(words[0].end, before[0].end);
-    assert.equal(words[0].estimated, true);       // red flag restored
+    assert.equal(words[0].estimated, true);       // amber flag restored
     assert.equal(words[0].origStart, 1.00);
     assert.equal(words[0].origEnd, 1.40);
     assert.equal(words[0].ctcAligned, undefined);
