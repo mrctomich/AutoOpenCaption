@@ -2550,6 +2550,31 @@ const App = {
         this.updatePreview();
     },
 
+    /**
+     * Set the in ('start') or out ('end') edge of the selected word to the
+     * playhead time (i / o shortcuts). Playhead = video.currentTime; the
+     * timeline mirrors it via setTime() (one-writer rule). Clamps against
+     * the opposite edge instead of crossing it, and skips the undo save
+     * when the value wouldn't change (same no-op discipline as the
+     * timeline gesture funnel).
+     */
+    setWordEdgeAtPlayhead(field) {
+        if (!this.transcript || this.selectedWordIndex < 0) return;
+        if (field !== 'start' && field !== 'end') return;
+        const t = this.video.currentTime;
+        if (!Number.isFinite(t) || t < 0) return;
+        const word = this.transcript.words[this.selectedWordIndex];
+        const next = field === 'start' ? Math.min(t, word.end) : Math.max(t, word.start);
+        if (next === word[field]) return;
+        this.saveState();
+        word[field] = next;
+        word.userAdjusted = true; // addressed: outline agrees with the editor
+        this.rebuildLayout();            // also timeline.invalidate() (lanes)
+        this.renderTranscriptEditor();
+        this.updateInspector();
+        this.updatePreview();
+    },
+
     deleteWord(index) {
         if (!this.transcript) return;
         this.saveState();
@@ -2641,11 +2666,19 @@ const App = {
     },
 
     // ── Keyboard Shortcuts ──────────────────────────────────
+    // Map: Space play/pause · =/+ zoom in · -/_ zoom out ·
+    //        i set word start at playhead · o set word end at playhead ·
+    //        Ctrl+Z/Y undo/redo · F2 edit text · Delete remove word ·
+    //        d debug overlay. Editing-in-progress (contentEditable, input,
+    //        textarea, select) and modifier chords never trigger these.
     bindKeyboardShortcuts() {
         document.addEventListener('keydown', (e) => {
-            const isEditing = document.activeElement?.contentEditable === 'true' || 
-                             document.activeElement?.tagName === 'INPUT';
-            
+            const tag = document.activeElement?.tagName;
+            const isEditing = document.activeElement?.contentEditable === 'true' ||
+                             tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+            // Space activates a focused button/link natively — don't hijack it.
+            const isActivatable = tag === 'BUTTON' || tag === 'A';
+
             if (e.ctrlKey && e.key === 'z') {
                 e.preventDefault();
                 this.undo();
@@ -2667,9 +2700,28 @@ const App = {
             } else if (e.key === 'Delete' && this.selectedWordIndex >= 0 && !isEditing) {
                 e.preventDefault();
                 this.deleteWord(this.selectedWordIndex);
-            } else if (e.key === 'd' && !e.ctrlKey && !e.altKey && !isEditing) {
-                this.debugOverlay = !this.debugOverlay;
-                this.updatePreview();
+            } else if (!e.ctrlKey && !e.metaKey && !e.altKey && !isEditing) {
+                // Bare-key shortcuts (no modifier chords may reach here).
+                if (e.code === 'Space' || e.key === ' ') {
+                    if (isActivatable) return; // let the focused button take Space
+                    e.preventDefault();
+                    this.togglePlay();
+                } else if (e.key === '=' || e.key === '+') {
+                    e.preventDefault();
+                    this.timeline?.zoomBy(1.6);
+                } else if (e.key === '-' || e.key === '_') {
+                    e.preventDefault();
+                    this.timeline?.zoomBy(1 / 1.6);
+                } else if (e.key === 'i') {
+                    e.preventDefault();
+                    this.setWordEdgeAtPlayhead('start');
+                } else if (e.key === 'o') {
+                    e.preventDefault();
+                    this.setWordEdgeAtPlayhead('end');
+                } else if (e.key === 'd') {
+                    this.debugOverlay = !this.debugOverlay;
+                    this.updatePreview();
+                }
             }
         });
     },
