@@ -2593,22 +2593,52 @@ const App = {
     splitWord(index) {
         if (!this.transcript) return;
         const word = this.transcript.words[index];
-        if (word.text.length < 2) return;
+        if (!word) return;
+
+        // Users often type a whole phrase into one slot after the fact, so
+        // split must break BETWEEN words first. Only a single-word slot may
+        // be cut in half. Work on a whitespace-normalized view of the text
+        // (trim + collapse runs) so both halves come out clean.
+        const text = word.text.trim().replace(/\s+/g, ' ');
+        let left, right, ratio;
+        const spaces = [];
+        for (let i = 0; i < text.length; i++) {
+            if (text[i] === ' ') spaces.push(i);
+        }
+        if (spaces.length > 0) {
+            // Break at the space nearest the character midpoint, so repeated
+            // splitting peels a phrase roughly in half each time.
+            const target = text.length / 2;
+            let best = spaces[0];
+            for (const s of spaces) {
+                if (Math.abs(s - target) < Math.abs(best - target)) best = s;
+            }
+            left = text.slice(0, best);
+            right = text.slice(best + 1);
+            // Timing stays proportional to character counts; the consumed
+            // space counts half to each side.
+            ratio = (best + 0.5) / text.length;
+        } else {
+            if (text.length < 2) return;
+            const mid = Math.floor(text.length / 2);
+            left = text.slice(0, mid);
+            right = text.slice(mid);
+            ratio = mid / text.length;
+        }
 
         this.saveState();
-        const mid = Math.floor(word.text.length / 2);
-        const splitPoint = word.start + (word.end - word.start) * (mid / word.text.length);
+        const splitPoint = word.start + (word.end - word.start) * ratio;
 
         // Spread the original word so estimated/orig* metadata survives the
         // split; both halves count as addressed (userAdjusted → green).
         this.transcript.words.splice(index, 1, {
             ...word,
-            id: word.id, text: word.text.slice(0, mid),
+            id: word.id, text: left,
             start: word.start, end: splitPoint, deleted: false,
             userAdjusted: true
         }, {
             ...word,
-            id: `w${String(Date.now()).slice(-6)}`, text: word.text.slice(mid),
+            id: `w${String(Date.now()).slice(-6)}`, text: right,
             start: splitPoint, end: word.end, deleted: false,
             userAdjusted: true
         });
