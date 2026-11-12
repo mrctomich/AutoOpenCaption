@@ -901,6 +901,11 @@ const App = {
         this.renderTranscriptDisplay();
         this.updatePreview();
         this.timeline?.invalidate();
+        // Type-at-once: a new caption's text is empty, so move focus straight
+        // into the inspector's text field — create, then type, no mouse trip.
+        // Enter commits / Escape cancels through the existing inspector wiring
+        // (bindInspectorControls keydown -> blur fires the change commit).
+        document.getElementById('inspector-text')?.focus();
         if (plan.shrunk) {
             Status.msg('Caption shortened to fit the gap between words.');
         } else {
