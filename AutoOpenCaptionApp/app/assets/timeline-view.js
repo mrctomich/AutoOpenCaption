@@ -12,7 +12,7 @@
  * Interaction map (design doc):
  *   wheel                → horizontal scroll
  *   ctrl+wheel           → zoom at cursor
- *   zoom buttons / +/-   → zoom at playhead
+ *   zoom buttons / +/-   → zoom at playhead (zoom-in centers it)
  *   drag ruler           → pan
  *   click ruler          → seek
  *   drag waveform        → scrub (continuous seek)

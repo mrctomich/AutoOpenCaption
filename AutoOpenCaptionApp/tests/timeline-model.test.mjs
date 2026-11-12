@@ -75,33 +75,45 @@ test('zoomAtAnchor: clamped at both extremes', () => {
     assert.ok(z.viewStartSec >= 0);
 });
 
-test('zoomAtTime: playhead stays at its pixel when already visible', () => {
-    const vp = createViewport({ durationSec: 60, viewWidthPx: 1000, pps: 40 });
-    vp.viewStartSec = 5;                       // visible window = 5..30 s
-    const tPlay = 12;
-    const xPlay = timeToX(vp, tPlay);
-    const next = zoomAtTime(vp, tPlay, 1.6);
-    assert.ok(Math.abs(next.pps - vp.pps * 1.6) < EPS);
-    assert.ok(Math.abs(xToTime(next, xPlay) - tPlay) < 1e-9,
-        `playhead drifted: ${xToTime(next, xPlay)}`);
-});
-
-test('zoomAtTime: off-screen playhead is scrolled into view, then pinned', () => {
+test('zoomAtTime: zoom-in centers the playhead', () => {
     const vp = createViewport({ durationSec: 60, viewWidthPx: 1000, pps: 40 });
     vp.viewStartSec = 5;                       // window = 5..30 s
-    const next = zoomAtTime(vp, 45, 1.6);      // playhead at 45 s, off-screen right
-    // scrollToTime centers it → lands mid-view (45 - span/2 = 35 > maxViewStart
-    // clamps it, so assert visibility rather than exact centering).
-    assert.ok(45 >= next.viewStartSec && 45 <= viewEndTime(next), 'playhead off-screen');
-    const xPlay = timeToX(next, 45);
-    const again = zoomAtTime(next, 45, 1.6);
-    assert.ok(Math.abs(xToTime(again, xPlay) - 45) < 1e-9);
+    const next = zoomAtTime(vp, 12, 1.6);
+    assert.ok(Math.abs(next.pps - vp.pps * 1.6) < EPS);
+    // Playhead lands dead center; further zoom-ins keep it there.
+    assert.ok(Math.abs(xToTime(next, 500) - 12) < 1e-9,
+        `playhead not centered: ${xToTime(next, 500)}`);
+    const again = zoomAtTime(next, 12, 1.6);
+    assert.ok(Math.abs(xToTime(again, 500) - 12) < 1e-9);
 });
 
-test('zoomAtTime: zoom out at playhead clamps at fit; clamps at time 0', () => {
+test('zoomAtTime: off-screen playhead is centered by zoom-in', () => {
+    const vp = createViewport({ durationSec: 60, viewWidthPx: 1000, pps: 40 });
+    vp.viewStartSec = 5;                       // window = 5..30 s
+    const next = zoomAtTime(vp, 45, 1.6);      // playhead off-screen right
+    assert.ok(45 >= next.viewStartSec && 45 <= viewEndTime(next), 'playhead off-screen');
+    assert.ok(Math.abs(xToTime(next, 500) - 45) < 1e-9);
+});
+
+test('zoomAtTime: centering clamps at the edges (as much as possible)', () => {
+    const vp = createViewport({ durationSec: 60, viewWidthPx: 1000, pps: 40 });
+    const left = zoomAtTime(vp, 0, 1.6);       // playhead at t=0 cannot center
+    assert.equal(left.viewStartSec, 0);
+    assert.equal(timeToX(left, 0), 0);
+    const right = zoomAtTime(vp, 60, 1.6);     // playhead at video end
+    assert.ok(Math.abs(right.viewStartSec - maxViewStart(right)) < 1e-9);
+    assert.ok(Math.abs(viewEndTime(right) - 60) < 1e-9);
+});
+
+test('zoomAtTime: zoom-out pins the playhead pixel; clamps at fit and MAX_PPS', () => {
     const vp = createViewport({ durationSec: 60, viewWidthPx: 1000 }); // already fit
     const noChange = zoomAtTime(vp, 30, 0.5);
     assert.equal(noChange.pps, vp.pps);
+    const pin = createViewport({ durationSec: 60, viewWidthPx: 1000, pps: 40 });
+    pin.viewStartSec = 10;                     // playhead mid-content: pin feasible
+    const xPlay = timeToX(pin, 12);
+    const out = zoomAtTime(pin, 12, 0.5);
+    assert.ok(Math.abs(xToTime(out, xPlay) - 12) < 1e-9, 'zoom-out moved the playhead');
     let z = createViewport({ durationSec: 60, viewWidthPx: 1000, pps: 100 });
     for (let i = 0; i < 20; i++) z = zoomAtTime(z, 0, 2);
     assert.equal(z.pps, MAX_PPS);
