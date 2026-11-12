@@ -85,6 +85,18 @@ export function zoomAtAnchor(vp, anchorX, factor) {
     return next;
 }
 
+/**
+ * Zoom keeping a TIME fixed (playhead zoom): if the time is off-screen it is
+ * scrolled into view first (scrollToTime centers it), then zoomAtAnchor pins
+ * its pixel. This is what toolbar/keyboard zoom uses; ctrl+wheel keeps the
+ * raw cursor-pixel zoomAtAnchor.
+ */
+export function zoomAtTime(vp, tSec, factor) {
+    const t = Number.isFinite(tSec) ? tSec : 0;
+    const scrolled = scrollToTime(vp, t);
+    return zoomAtAnchor(scrolled, timeToX(scrolled, t), factor);
+}
+
 /** Pan by a pixel delta (drag-right moves the window left in time). */
 export function panByPixels(vp, dxPx) {
     const next = { ...vp, viewStartSec: vp.viewStartSec - dxPx / (vp.pps || 1) };

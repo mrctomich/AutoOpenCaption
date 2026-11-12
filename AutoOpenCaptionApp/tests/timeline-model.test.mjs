@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import {
     createViewport, fitPps, clampPps, clampViewStart, maxViewStart,
     timeToX, xToTime, viewEndTime,
-    zoomAtAnchor, panByPixels, fitViewport, scrollToTime,
+    zoomAtAnchor, zoomAtTime, panByPixels, fitViewport, scrollToTime,
     pickRulerStep, rulerTicks, formatRulerTime,
     boxRect, MIN_BOX_PX, MAX_PPS, RULER_STEPS,
 } from '../app/assets/timeline-model.js';
@@ -73,6 +73,47 @@ test('zoomAtAnchor: clamped at both extremes', () => {
     for (let i = 0; i < 20; i++) z = zoomAtAnchor(z, 0, 2);
     assert.equal(z.pps, MAX_PPS);
     assert.ok(z.viewStartSec >= 0);
+});
+
+test('zoomAtTime: playhead stays at its pixel when already visible', () => {
+    const vp = createViewport({ durationSec: 60, viewWidthPx: 1000, pps: 40 });
+    vp.viewStartSec = 5;                       // visible window = 5..30 s
+    const tPlay = 12;
+    const xPlay = timeToX(vp, tPlay);
+    const next = zoomAtTime(vp, tPlay, 1.6);
+    assert.ok(Math.abs(next.pps - vp.pps * 1.6) < EPS);
+    assert.ok(Math.abs(xToTime(next, xPlay) - tPlay) < 1e-9,
+        `playhead drifted: ${xToTime(next, xPlay)}`);
+});
+
+test('zoomAtTime: off-screen playhead is scrolled into view, then pinned', () => {
+    const vp = createViewport({ durationSec: 60, viewWidthPx: 1000, pps: 40 });
+    vp.viewStartSec = 5;                       // window = 5..30 s
+    const next = zoomAtTime(vp, 45, 1.6);      // playhead at 45 s, off-screen right
+    // scrollToTime centers it → lands mid-view (45 - span/2 = 35 > maxViewStart
+    // clamps it, so assert visibility rather than exact centering).
+    assert.ok(45 >= next.viewStartSec && 45 <= viewEndTime(next), 'playhead off-screen');
+    const xPlay = timeToX(next, 45);
+    const again = zoomAtTime(next, 45, 1.6);
+    assert.ok(Math.abs(xToTime(again, xPlay) - 45) < 1e-9);
+});
+
+test('zoomAtTime: zoom out at playhead clamps at fit; clamps at time 0', () => {
+    const vp = createViewport({ durationSec: 60, viewWidthPx: 1000 }); // already fit
+    const noChange = zoomAtTime(vp, 30, 0.5);
+    assert.equal(noChange.pps, vp.pps);
+    let z = createViewport({ durationSec: 60, viewWidthPx: 1000, pps: 100 });
+    for (let i = 0; i < 20; i++) z = zoomAtTime(z, 0, 2);
+    assert.equal(z.pps, MAX_PPS);
+    assert.equal(z.viewStartSec, 0);           // playhead at 0 → never pans negative
+});
+
+test('zoomAtTime: non-finite time behaves like time 0', () => {
+    const vp = createViewport({ durationSec: 60, viewWidthPx: 1000, pps: 100 });
+    const a = zoomAtTime(vp, NaN, 1.6);
+    const b = zoomAtTime(vp, 0, 1.6);
+    assert.equal(a.viewStartSec, b.viewStartSec);
+    assert.equal(a.pps, b.pps);
 });
 
 test('panByPixels: pans and clamps at both edges', () => {
