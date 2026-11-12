@@ -42,7 +42,7 @@ import { columnsFromPeaks } from './waveform.js';
 
 const STORAGE_KEY = '***';
 const RULER_H = 22;
-const LANE_H = 22;           // one caption lane row
+const LANE_H = 44;           // one caption lane row (was 22; boxes were too thin to read)
 const LANE_MIN_H = 24;       // lane strip when there are no lanes to show
 const MIN_HEIGHT = 130;
 const MAX_HEIGHT_FRAC = 0.6; // of window height
