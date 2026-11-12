@@ -78,9 +78,14 @@ aligner (wav2vec2-base-960h). The first click downloads a one-time
 English transcripts only — the button stays disabled for other
 languages. Words you adjusted manually keep YOUR timings, words the
 aligner is not confident about keep their Whisper timings, and
-"Revert timing" restores the whole pre-realign state. Note: running
-the aligner alongside a loaded Whisper model increases peak browser
-memory; the confidence threshold is not yet calibrated on real audio.
+"Revert timing" restores the whole pre-realign state. CTC timings are
+kept chronological: an aligned word is never stamped before the end of
+the previous word, so realign cannot create overlapping captions (kept
+Whisper timings are never moved; if one of those overlaps its
+neighbour you get a warning and can fix it in the inspector). Note:
+running the aligner alongside a loaded Whisper model increases peak
+browser memory; the confidence threshold is not yet calibrated on real
+audio.
 
 Style Presets
 -------------
