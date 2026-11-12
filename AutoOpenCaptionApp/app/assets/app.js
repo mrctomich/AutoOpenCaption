@@ -2559,7 +2559,11 @@ const App = {
      * timeline gesture funnel).
      */
     setWordEdgeAtPlayhead(field) {
-        if (!this.transcript || this.selectedWordIndex < 0) return;
+        if (!this.transcript) return;
+        if (this.selectedWordIndex < 0) {
+            Status.msg('Select a word first (click it) — then i/o set its start/end at the playhead.');
+            return;
+        }
         if (field !== 'start' && field !== 'end') return;
         const t = this.video.currentTime;
         if (!Number.isFinite(t) || t < 0) return;
@@ -2673,16 +2677,24 @@ const App = {
     //        textarea, select) and modifier chords never trigger these.
     bindKeyboardShortcuts() {
         document.addEventListener('keydown', (e) => {
-            const tag = document.activeElement?.tagName;
-            const isEditing = document.activeElement?.contentEditable === 'true' ||
-                             tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+            const ae = document.activeElement;
+            const tag = ae?.tagName;
+            // Only TEXT-like inputs block shortcuts. Range (scrubber),
+            // checkbox and button-ish inputs never accept typed text, so
+            // treating them as "editing" used to deaden every shortcut
+            // after a scrubber click until focus moved elsewhere.
+            const textTypes = ['text','number','search','email','url',
+                               'password','tel','date','time','month','week'];
+            const isEditing = ae?.contentEditable === 'true' || tag === 'TEXTAREA' ||
+                              tag === 'SELECT' || (tag === 'INPUT' && textTypes.includes(ae.type));
             // Space activates a focused button/link natively — don't hijack it.
             const isActivatable = tag === 'BUTTON' || tag === 'A';
+            const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
 
-            if (e.ctrlKey && e.key === 'z') {
+            if (e.ctrlKey && key === 'z') {
                 e.preventDefault();
                 this.undo();
-            } else if (e.ctrlKey && e.key === 'y') {
+            } else if (e.ctrlKey && key === 'y') {
                 e.preventDefault();
                 this.redo();
             } else if (e.key === 'F2' && this.selectedWordIndex >= 0 && !isEditing) {
@@ -2702,23 +2714,24 @@ const App = {
                 this.deleteWord(this.selectedWordIndex);
             } else if (!e.ctrlKey && !e.metaKey && !e.altKey && !isEditing) {
                 // Bare-key shortcuts (no modifier chords may reach here).
+                // Letters are compared lowercased so CapsLock/Shift work.
                 if (e.code === 'Space' || e.key === ' ') {
                     if (isActivatable) return; // let the focused button take Space
                     e.preventDefault();
                     this.togglePlay();
-                } else if (e.key === '=' || e.key === '+') {
+                } else if (key === '=' || key === '+') {
                     e.preventDefault();
                     this.timeline?.zoomBy(1.6);
-                } else if (e.key === '-' || e.key === '_') {
+                } else if (key === '-' || key === '_') {
                     e.preventDefault();
                     this.timeline?.zoomBy(1 / 1.6);
-                } else if (e.key === 'i') {
+                } else if (key === 'i') {
                     e.preventDefault();
                     this.setWordEdgeAtPlayhead('start');
-                } else if (e.key === 'o') {
+                } else if (key === 'o') {
                     e.preventDefault();
                     this.setWordEdgeAtPlayhead('end');
-                } else if (e.key === 'd') {
+                } else if (key === 'd') {
                     this.debugOverlay = !this.debugOverlay;
                     this.updatePreview();
                 }

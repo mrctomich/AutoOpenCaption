@@ -33,10 +33,13 @@ const kbdSrc = extractFn('bindKeyboardShortcuts() {');
 // Build a callable from the extracted method source: drop the method
 // signature, keep the body, rewrap as a plain function expression.
 // (Anchor the body on the signature, not indexOf('{') — the JSDoc above
-// the method contains braces too.)
+// the method contains braces too.) Status is a module-level const in
+// app.js; inject a recording stub.
+const statusMsgs = [];
 const edgeBody = edgeSrc.slice(edgeSrc.indexOf('setWordEdgeAtPlayhead(field) {')
     + 'setWordEdgeAtPlayhead(field) {'.length, edgeSrc.lastIndexOf('}'));
-const setWordEdgeAtPlayhead = new Function('return function (field) {' + edgeBody + '}')();
+const setWordEdgeAtPlayhead = new Function('Status',
+    'return function (field) {' + edgeBody + '}')({ msg: (m) => statusMsgs.push(m) });
 
 // ── 1. behavioral: setWordEdgeAtPlayhead ──────────────────────────
 
@@ -105,14 +108,10 @@ test('a real change saves undo exactly once and refreshes downstream', () => {
     }
 });
 
-test('guards: no transcript / no selection / bad field / bad time', () => {
+test('guards: no transcript / bad field / bad time', () => {
     const a = stubApp({ transcript: false });
     setWordEdgeAtPlayhead.call(a.app, 'start');
     assert.equal(a.calls.length, 0);
-
-    const b = stubApp({ selected: -1 });
-    setWordEdgeAtPlayhead.call(b.app, 'start');
-    assert.equal(b.calls.length, 0);
 
     const c = stubApp();
     setWordEdgeAtPlayhead.call(c.app, 'middle');
@@ -126,6 +125,15 @@ test('guards: no transcript / no selection / bad field / bad time', () => {
     const e = stubApp({ time: Infinity });
     setWordEdgeAtPlayhead.call(e.app, 'start');
     assert.equal(e.calls.length, 0);
+});
+
+test('no selection: i/o hint via Status, never mutate or save', () => {
+    const b = stubApp({ selected: -1 });
+    const before = statusMsgs.length;
+    setWordEdgeAtPlayhead.call(b.app, 'start');
+    assert.equal(b.calls.length, 0);
+    assert.equal(statusMsgs.length, before + 1, 'must hint the user');
+    assert.match(statusMsgs.at(-1), /select a word/i);
 });
 
 // ── 2. source guards on the key map ───────────────────────────────
@@ -142,8 +150,8 @@ test('space toggles playback with preventDefault, only as a bare key', () => {
 });
 
 test('= and + zoom the timeline in; - and _ zoom out', () => {
-    assert.match(kbdSrc, /e\.key === '=' \|\| e\.key === '\+'[\s\S]{0,80}?zoomBy\(1\.6\)/);
-    assert.match(kbdSrc, /e\.key === '-' \|\| e\.key === '_'[\s\S]{0,80}?zoomBy\(1 \/ 1\.6\)/);
+    assert.match(kbdSrc, /key === '=' \|\| key === '\+'[\s\S]{0,80}?zoomBy\(1\.6\)/);
+    assert.match(kbdSrc, /key === '-' \|\| key === '_'[\s\S]{0,80}?zoomBy\(1 \/ 1\.6\)/);
     // Same factor as the toolbar zoom buttons (timeline-view.js).
     const viewSrc = readFileSync(
         fileURLToPath(new URL('../app/assets/timeline-view.js', import.meta.url)), 'utf8',
@@ -153,8 +161,14 @@ test('= and + zoom the timeline in; - and _ zoom out', () => {
 });
 
 test('i and o route to setWordEdgeAtPlayhead start/end', () => {
-    assert.match(kbdSrc, /e\.key === 'i'[\s\S]{0,80}?setWordEdgeAtPlayhead\('start'\)/);
-    assert.match(kbdSrc, /e\.key === 'o'[\s\S]{0,80}?setWordEdgeAtPlayhead\('end'\)/);
+    assert.match(kbdSrc, /key === 'i'[\s\S]{0,80}?setWordEdgeAtPlayhead\('start'\)/);
+    assert.match(kbdSrc, /key === 'o'[\s\S]{0,80}?setWordEdgeAtPlayhead\('end'\)/);
+});
+
+test('letter keys match case-insensitively (CapsLock/Shift safe)', () => {
+    assert.match(kbdSrc, /const key = typeof e\.key === 'string' \? e\.key\.toLowerCase\(\)/);
+    assert.match(kbdSrc, /key === 'i'/);
+    assert.match(kbdSrc, /key === 'o'/);
 });
 
 test('every new shortcut preventDefaults before acting', () => {
@@ -170,10 +184,31 @@ test('every new shortcut preventDefaults before acting', () => {
 });
 
 test('editing-in-progress blocks the bare-key shortcuts', () => {
-    // isEditing covers contentEditable, INPUT, TEXTAREA and SELECT.
-    assert.match(kbdSrc, /contentEditable === 'true'[\s\S]*?INPUT[\s\S]*?TEXTAREA[\s\S]*?SELECT/);
+    // isEditing covers contentEditable, TEXTAREA, SELECT and TEXT-like INPUTs.
+    for (const tok of ["contentEditable === 'true'", 'TEXTAREA', 'SELECT', 'textTypes']) {
+        assert.ok(kbdSrc.includes(tok), `isEditing must cover ${tok}`);
+    }
     // The bare-key branch is gated on !isEditing (Space/zoom/i/o/d).
     assert.match(kbdSrc, /!e\.ctrlKey && !e\.metaKey && !e\.altKey && !isEditing/);
+});
+
+test('non-text inputs (scrubber range) do NOT block shortcuts', () => {
+    // Regression: every INPUT counted as "editing", so a scrubber click
+    // deadened Space/zoom/i/o until focus moved to another control.
+    assert.match(kbdSrc, /tag === 'INPUT' && textTypes\.includes\(ae\.type\)/);
+    assert.match(kbdSrc, /\['text','number','search','email','url',/);
+    assert.ok(!kbdSrc.includes("'range'"), "range must never be a blocking type");
+});
+
+test('timeline click takes canvas focus (escapes the editing-focus trap)', () => {
+    // Regression: pointerdown preventDefault() suppressed the native focus
+    // change, stranding focus in the last text input / contentEditable chip
+    // and silently disabling every shortcut. The canvas must focus itself.
+    const viewSrc = readFileSync(
+        fileURLToPath(new URL('../app/assets/timeline-view.js', import.meta.url)), 'utf8',
+    ).replace(/\r\n/g, '\n');
+    assert.match(viewSrc,
+        /e\.preventDefault\(\);[\s\S]{0,700}?c\.focus\(\{ preventScroll: true \}\);[\s\S]{0,120}?setPointerCapture/);
 });
 
 test('pre-existing shortcuts survive the rewrite', () => {
