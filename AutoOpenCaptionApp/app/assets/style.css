@@ -156,8 +156,9 @@ header nav {
 .btn-gear::after {
     content: "▾";
     margin-left: 6px;
-    font-size: 14px;
-    opacity: 0.85;
+    font-size: 18px;   /* match the timeline collapse triangle — 14px still read as invisible */
+    line-height: 1;
+    opacity: 0.9;
 }
 
 .render-settings-menu {
