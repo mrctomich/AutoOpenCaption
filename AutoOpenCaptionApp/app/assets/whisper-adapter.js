@@ -326,3 +326,64 @@ export function whisperToTranscript(result, audioDuration, sourceFile, language,
         }
     };
 }
+
+/**
+ * How many generation windows the transformers.js ASR pipeline will run for
+ * this audio — the honest denominator for a transcription progress bar.
+ * Mirrors _call_whisper's chunk loop EXACTLY: windows of chunkLengthS
+ * seconds advancing by (chunkLengthS - 2*strideLengthS); audio that fits
+ * in one window is a single generate() call. Each window is exactly one
+ * model.generate(), so windows-done / windows-total is real progress, not
+ * a spin trick.
+ *
+ * Computed in sample counts (integers), like the library does: a duration
+ * that lands exactly on a window boundary can then never flip the count
+ * through float noise.
+ *
+ * @param {object} o
+ * @param {number} o.sampleCount   audio length in samples (post-resample; 16 kHz here)
+ * @param {number} o.chunkLengthS  pipeline chunk_length_s
+ * @param {number} o.strideLengthS pipeline stride_length_s
+ * @param {number} o.sampleRate    rate the samples are at
+ * @returns {number} >= 1
+ */
+export function whisperWindowCount({ sampleCount, chunkLengthS = 30, strideLengthS = 5, sampleRate = 16000 }) {
+    const len = Number(sampleCount);
+    if (!Number.isFinite(len) || len <= 0) return 1;
+    const window = chunkLengthS * sampleRate;
+    const hop = window - 2 * strideLengthS * sampleRate;
+    if (hop <= 0) {
+        // The library only checks chunk > stride; stride >= chunk/2 would
+        // make its window loop never advance. Fail loudly instead of
+        // returning a count the progress bar would render as a lie.
+        throw new Error('chunk_length_s must exceed 2 x stride_length_s for windowed transcription');
+    }
+    if (len <= window) return 1;
+    return 1 + Math.ceil((len - window) / hop);
+}
+
+/**
+ * Duck-typed transformers.js streamer that turns per-window generate()
+ * completions into progress callbacks. The pipeline forwards this object
+ * into EVERY model.generate() call it makes (one per audio window); the
+ * generation loop calls streamer.end() exactly once when a window finishes
+ * decoding. put() (fired per token batch) is deliberately a no-op: token
+ * counts carry no information about how much AUDIO is done, and whisper
+ * tokens-per-second varies wildly with speech density.
+ *
+ * @param {number} windows          whisperWindowCount(...) total
+ * @param {(done:number, total:number)=>void} onWindowDone fires for done = 1..windows, never above total
+ * @returns {{ put: () => void, end: () => void }}
+ */
+export function makeWindowProgressStreamer(windows, onWindowDone) {
+    const total = Number.isFinite(windows) && windows >= 1 ? Math.floor(windows) : 1;
+    let done = 0;
+    return {
+        put() { /* token-level ticks intentionally ignored — see doc */ },
+        end() {
+            if (done >= total) return; // tolerate a stray end(); never overshoot
+            done += 1;
+            onWindowDone(done, total);
+        }
+    };
+}
