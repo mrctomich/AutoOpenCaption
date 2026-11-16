@@ -1,5 +1,6 @@
 import { FFmpegService } from './ffmpeg-service.js';
 import { whisperToTranscript, whisperWindowCount, makeWindowProgressStreamer } from './whisper-adapter.js';
+import { parseCaptionFile, buildImportedTranscript } from './caption-import.js';
 import { groupWords, findGroupAtTime, computeLayout, drawGroup, drawDiagnostics, resolveGroupYpx, baseYpx } from './caption-renderer.js';
 import { installResumableFetch, isFileCached } from './resumable-fetch.js';
 import { loadCtcAligner, alignCtcTranscript, CtcAlignerError, CTC_MODEL_ID } from './ctc-aligner.js';
@@ -578,6 +579,7 @@ const App = {
         document.getElementById('btn-import').addEventListener('click', () => this.importVideo());
         document.getElementById('btn-transcribe').addEventListener('click', () => this.transcribe());
         document.getElementById('btn-transcribe-model').addEventListener('click', () => this.transcribe());
+        document.getElementById('btn-import-captions').addEventListener('click', () => this.importCaptions());
         document.getElementById('btn-ctc-realign').addEventListener('click', () => this.realignWordTiming());
         document.getElementById('btn-ctc-revert').addEventListener('click', () => this.revertCtcTiming());
         document.getElementById('btn-play').addEventListener('click', () => this.togglePlay());
@@ -662,6 +664,10 @@ const App = {
             .addEventListener('click', () => this.resolveCaptionChoice('clear'));
         document.getElementById('btn-modal-cancel-load')
             .addEventListener('click', () => this.resolveCaptionChoice(null));
+        document.getElementById('btn-modal-import-ok')
+            .addEventListener('click', () => this.resolveCaptionImport(true));
+        document.getElementById('btn-modal-import-cancel')
+            .addEventListener('click', () => this.resolveCaptionImport(false));
 
         this.bindStyleControls();
     },
@@ -934,6 +940,150 @@ const App = {
         document.getElementById('drop-zone').classList.add('hidden');
     },
 
+    // ── Import captions (SRT / VTT) ─────────────────────────
+    // The "bring your own captions" path: parseCaptionFile +
+    // buildImportedTranscript (caption-import.js) do all the pure work;
+    // this method only reads the file, gets consent with the honest
+    // restriction notice, then commits the transcript behind the same
+    // UI-update sequence a finished transcription runs.
+    importCaptions() {
+        if (this._captionImportResolve) return; // restriction modal already open
+        if (!this.videoFile) {
+            Status.warning('Load a video first — imported captions need a video to time against.');
+            return;
+        }
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.srt,.vtt';
+        input.onchange = (e) => {
+            const file = e.target.files[0];
+            if (file) this.loadCaptionFile(file);
+        };
+        input.click();
+    },
+
+    async loadCaptionFile(file) {
+        let text;
+        try {
+            text = await file.text();
+        } catch (err) {
+            Status.error(`Could not read "${file.name}": ${err.message}`);
+            return;
+        }
+        let parsed;
+        try {
+            parsed = parseCaptionFile(text);
+        } catch (err) {
+            Status.error(`Could not parse "${file.name}": ${err.message}`);
+            return;
+        }
+        if (!parsed.cues.length) {
+            Status.error(`No usable caption cues found in "${file.name}".`);
+            return;
+        }
+
+        // Restriction notice BEFORE replacing anything (parse already ran,
+        // so the cue count quoted in the modal is real). Cancel/Escape
+        // leaves the current video and captions completely untouched.
+        // A styled modal, not native confirm(): the dialog is sized to the
+        // whole message, so nothing hides behind a scrollbar.
+        const replacing = !!(this.transcript && this.transcript.words.length);
+        const ok = await this.askCaptionImport(parsed, file, replacing);
+        if (!ok) return;
+
+        const transcript = buildImportedTranscript(parsed, { sourceFile: file.name });
+        this.transcript = transcript;
+        this.transcriptMeta = {
+            model: `Imported ${parsed.format.toUpperCase()}`,
+            processingTime: null, audioSamples: null, audioDuration: null,
+        };
+        this._ctcSnapshot = null; // nothing to revert on a fresh import
+        this.findMatches = [];
+        this._refreshFindCount?.();
+        this.selectedWordIndex = -1;
+        // Undo slots from the previous captions would resurrect a different
+        // caption set — same reasoning as clearCaptions().
+        this.undoStack = [];
+        this.redoStack = [];
+
+        this.rebuildLayout();
+        this.renderTranscriptEditor();
+        this.renderTranscriptDisplay();
+        this.updateDiagnostics();
+        this.updateInspector();
+        this.updateCtcUi();
+        this.timeline?.invalidate();
+
+        document.getElementById('btn-export-srt').disabled = false;
+        document.getElementById('btn-export-vtt').disabled = false;
+        document.getElementById('btn-generate').disabled = false;
+        Pipeline.complete('transcribe');
+        Pipeline.complete('edit');
+
+        Status.success(`Imported ${transcript.timing.importedCues} captions (${transcript.words.length} words) from "${file.name}"`);
+        if (transcript.timing.clampedCues > 0) {
+            Status.warning(`${transcript.timing.clampedCues} caption ${transcript.timing.clampedCues === 1 ? 'block' : 'blocks'} overlapped the previous one — shifted forward so captions never overlap.`);
+        }
+        Status.warning('Word timings inside imported caption blocks are estimated (red outlines) — adjust a word or let the estimated timing stand, captions still show for the whole block.');
+
+        // The timeline waveform needs decoded audio, which only the
+        // transcription path used to produce. Decode it in the background
+        // so imported captions get the same waveform (and any transcribe
+        // later just re-decodes for itself). Fire-and-forget: a video
+        // without a decodable audio track must never fail an import.
+        this.buildImportedWaveform();
+    },
+
+    async buildImportedWaveform() {
+        const file = this.videoFile;
+        if (!file || this._waveformBuild) return; // one decode at a time
+        this._waveformBuild = true;
+        try {
+            if (!FFmpegService.isLoaded) {
+                Status.msg('Loading FFmpeg to build the waveform...');
+                await FFmpegService.init();
+            }
+            // extractAudio() owns its Progress overlay and hides it when
+            // done (same path transcription uses).
+            const { samples } = await this.extractAudio();
+            // Video swapped, transcribe took over, or the transcript was
+            // discarded while decoding: whoever owns _audioCache now wins.
+            if (this.videoFile !== file || this._transcribeRunning || !this.transcript) return;
+            this._audioCache = { samples, file };
+            this.buildWaveformPeaks();
+            Status.msg('Waveform ready — audio decoded from the video.');
+        } catch (err) {
+            Progress.hide(); // extraction may have died with the overlay up
+            Status.warning(`Waveform skipped — could not decode audio from the video (${err.message}). Captions are unaffected.`);
+        } finally {
+            this._waveformBuild = false;
+        }
+    },
+
+    // The import-restriction modal: resolves true (Import) or false
+    // (Cancel/Escape). Buttons are wired in bindEvents; Escape goes through
+    // the modal keyboard guard in bindKeyboardShortcuts. Same Promise-
+    // ownership shape as askCaptionReplacement.
+    askCaptionImport(parsed, file, replacing) {
+        return new Promise((resolve) => {
+            this._captionImportResolve = resolve;
+            document.getElementById('modal-import-detail').textContent =
+                `Import ${parsed.cues.length} caption${parsed.cues.length === 1 ? '' : 's'} from "${file.name}"` +
+                (replacing ? ' and REPLACE the current captions' : '') + '? ' +
+                'Caption files time whole caption blocks, never individual words:';
+            document.getElementById('modal-import-captions').classList.remove('hidden');
+            document.getElementById('btn-modal-import-ok').focus();
+        });
+    },
+
+    resolveCaptionImport(answer) {
+        if (!this._captionImportResolve) return; // already answered — no double-resolve
+        document.getElementById('modal-import-captions').classList.add('hidden');
+        const resolve = this._captionImportResolve;
+        this._captionImportResolve = null;
+        resolve(answer);
+    },
+
     // ── Timeline dock ───────────────────────────────────────
     bindTimeline() {
         this.timeline = new TimelineView(
@@ -1094,6 +1244,7 @@ const App = {
 
     onVideoLoaded() {
         document.getElementById('btn-transcribe').disabled = false;
+        document.getElementById('btn-import-captions').disabled = false;
         document.getElementById('btn-play').disabled = false;
         document.getElementById('scrubber').disabled = false;
         this.timeline?.setDuration(this.video.duration);
@@ -1423,7 +1574,9 @@ const App = {
         revert.disabled = !!this._ctcRunning;
         realign.title = supported
             ? 'Experimental: re-derive word timestamps from the audio with a CTC forced aligner'
-            : 'Experimental CTC realignment supports English only — transcribe with language "English" to enable it';
+            : (this.transcript && this.transcript.imported)
+                ? 'Realign timing is not available for imported caption files — realign works on transcriptions only'
+                : 'Experimental CTC realignment supports English only — transcribe with language "English" to enable it';
     },
 
     async realignWordTiming() {
@@ -2425,8 +2578,11 @@ const App = {
                 + (!word.deleted && word.captionY != null ? ' has-jump' : '')
                 + (findSet && findSet.has(i) ? ' find-match' : '');
             if (needsAttention) {
-                chip.title = 'Missing or collapsed timestamp — timing is estimated. '
-                    + 'Adjust the text, start, end, split or merge this word to mark it handled.';
+                chip.title = word.estimatedReason === 'caption-import'
+                    ? 'Timing comes from an imported caption file, which times whole blocks — this word timing is estimated. '
+                        + 'Adjust the text, start, end, split or merge this word to mark it handled.'
+                    : 'Missing or collapsed timestamp — timing is estimated. '
+                        + 'Adjust the text, start, end, split or merge this word to mark it handled.';
             } else if (adjusted) {
                 chip.title = 'Adjusted from the original transcript';
             }
@@ -3136,14 +3292,22 @@ const App = {
     //        textarea, select) and modifier chords never trigger these.
     bindKeyboardShortcuts() {
         document.addEventListener('keydown', (e) => {
-            // While the replace-video caption modal is open it owns the
-            // keyboard: Escape cancels the load, every other key is swallowed
-            // so shortcuts can't act on the still-loaded project underneath.
+            // While a caption modal is open it owns the keyboard: Escape
+            // cancels it, every other key is swallowed so shortcuts can't
+            // act on the still-loaded project underneath.
             const replaceModal = document.getElementById('modal-replace-captions');
             if (replaceModal && !replaceModal.classList.contains('hidden')) {
                 if (e.key === 'Escape') {
                     e.preventDefault();
                     this.resolveCaptionChoice(null);
+                }
+                return;
+            }
+            const importModal = document.getElementById('modal-import-captions');
+            if (importModal && !importModal.classList.contains('hidden')) {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    this.resolveCaptionImport(false);
                 }
                 return;
             }

@@ -1414,6 +1414,21 @@ select {
     margin-bottom: var(--space-3);
 }
 
+/* Restriction bullets under a short detail line: tighter gap between the
+   two than the default bottom-of-card margin. */
+#modal-import-detail { margin-bottom: var(--space-1); }
+
+.modal-card ul {
+    color: var(--text-secondary);
+    font-size: var(--text-size-sm);
+    line-height: 1.5;
+    margin: 0 0 var(--space-3) var(--space-2);
+    padding: 0;
+    list-style: disc;
+}
+
+.modal-card li { margin-bottom: 2px; }
+
 .modal-actions {
     display: flex;
     justify-content: flex-end;
