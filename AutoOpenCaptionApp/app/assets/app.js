@@ -453,6 +453,39 @@ const ModelStatus = {
     }
 };
 
+// ── Find & Replace ──────────────────────────────────────────
+/**
+ * Pure find-and-replace plan over a word array (Word Editor find bar).
+ * A word matches when its token — the text with leading/trailing
+ * punctuation stripped, e.g. `"hello,"` → `hello` — equals the search
+ * token (case-folded unless caseSensitive). Deleted words never match.
+ * The replacement re-uses the word's original surrounding punctuation,
+ * so only the word itself changes. Words whose text would not actually
+ * change are EXCLUDED from the plan: an empty plan means "nothing left
+ * to replace", so callers can treat it as a no-op and never burn an
+ * undo slot on a re-applied replacement.
+ * Returns [{ index, before, after }, ...] in transcript order.
+ */
+function planWordReplace(words, { search, replacement, caseSensitive = false } = {}) {
+    const needle = String(search ?? '').trim()
+        .replace(/^[^\p{L}\p{N}]+/u, '').replace(/[^\p{L}\p{N}]+$/u, '');
+    if (!needle) return [];
+    const repl = String(replacement ?? '');
+    const fold = (s) => (caseSensitive ? s : s.toLowerCase());
+    const plan = [];
+    (words || []).forEach((word, index) => {
+        if (!word || word.deleted) return;
+        const text = String(word.text ?? '');
+        const lead = text.match(/^[^\p{L}\p{N}]*/u)[0];
+        const trail = text.match(/[^\p{L}\p{N}]*$/u)[0];
+        const token = text.slice(lead.length, text.length - trail.length);
+        if (!token || fold(token) !== fold(needle)) return;
+        const after = lead + repl + trail;
+        if (after !== text) plan.push({ index, before: text, after });
+    });
+    return plan;
+}
+
 // ── Main App ────────────────────────────────────────────────
 const App = {
     video: null,
@@ -464,6 +497,7 @@ const App = {
     undoStack: [],
     redoStack: [],
     selectedWordIndex: -1,
+    findMatches: [], // word indices the find bar would still change
     captionGroups: [],
     captionLayout: [],
     debugOverlay: false,
@@ -518,6 +552,7 @@ const App = {
         this.loadPresets();
         this.bindKeyboardShortcuts();
         this.bindInspectorControls();
+        this.bindFindReplaceControls();
         this.bindCenterResizer();
         this.bindTimeline();
         this.updateModelStatus();
@@ -582,8 +617,14 @@ const App = {
             // before the button's own handler — deselecting here would make
             // zoom-to-selection always see an empty selection.
             const dock = document.getElementById('timeline-dock');
+            // The find bar's Find/Replace buttons act ON the selection too
+            // (they advance/replace at the selected word) — same exemption
+            // class as the timeline toolbar, or clicking Replace would
+            // deselect the word it just fixed.
+            const findBar = document.getElementById('find-bar');
             if (!selector.contains(e.target) && !inspector.contains(e.target)
-                && !(dock && dock.contains(e.target))) {
+                && !(dock && dock.contains(e.target))
+                && !(findBar && findBar.contains(e.target))) {
                 this.selectWord(-1);
             }
         });
@@ -855,6 +896,8 @@ const App = {
         this.undoStack = [];
         this.redoStack = [];
         this.selectedWordIndex = -1;
+        this.findMatches = [];
+        this._refreshFindCount?.(); // clear the find bar count/underline
         this._ctcSnapshot = null;
         this.rebuildLayout();          // groups/layout → [] + timeline Add-button state
         this.renderTranscriptEditor();
@@ -1906,6 +1949,8 @@ const App = {
 
             this.transcript = transcript;
             this._ctcSnapshot = null; // fresh transcript ⇒ nothing to revert
+            this.findMatches = [];    // old find matches are meaningless now
+            this._refreshFindCount?.();
             this.transcriptMeta = {
                 model: hubRepo(modelId),
                 processingTime: tEnd - tStart,
@@ -2363,6 +2408,10 @@ const App = {
 
         editor.innerHTML = '';
         this._lastActiveWordId = null;
+        // Find bar matches get an underline marker (bottom inset; the top
+        // inset already means vertical-jump).
+        const findSet = this.findMatches && this.findMatches.length
+            ? new Set(this.findMatches) : null;
         this.transcript.words.forEach((word, i) => {
             const chip = document.createElement('span');
             // Status outlines: green once the user has addressed the word,
@@ -2373,7 +2422,8 @@ const App = {
             chip.className = `word-chip ${word.deleted ? 'deleted' : ''} ${i === this.selectedWordIndex ? 'selected' : ''}`
                 + (adjusted ? ' adjusted' : needsAttention ? ' needs-attention' : '')
                 + (word.ctcAligned ? ' ctc-aligned' : '')
-                + (!word.deleted && word.captionY != null ? ' has-jump' : '');
+                + (!word.deleted && word.captionY != null ? ' has-jump' : '')
+                + (findSet && findSet.has(i) ? ' find-match' : '');
             if (needsAttention) {
                 chip.title = 'Missing or collapsed timestamp — timing is estimated. '
                     + 'Adjust the text, start, end, split or merge this word to mark it handled.';
@@ -2666,6 +2716,113 @@ const App = {
         document.getElementById('inspector-jump-clear').addEventListener('click', () => {
             if (this.selectedWordIndex < 0 || !this.transcript) return;
             this.setCaptionJump(this.selectedWordIndex, null);
+        });
+    },
+
+    // ── Find & Replace (Word Editor find bar) ───────────────
+    // All three entry points plan through the single pure
+    // planWordReplace(): matches = words that still DIFFER from the
+    // replacement, so "no matches" honestly means "nothing left to do"
+    // and both replace funnels skip saveState() on an empty plan
+    // (no-op edits never burn undo slots).
+    _findReplaceHint(search) {
+        Status.msg(String(search ?? '').trim()
+            ? `Nothing left to replace for "${String(search).trim()}".`
+            : 'Type a word to find first.', 'warning');
+    },
+
+    /** Select (and seek to) the next match after the current word, wrapping. */
+    findNextWord({ search, replacement, caseSensitive = false } = {}) {
+        if (!this.transcript) return false;
+        const plan = planWordReplace(this.transcript.words, { search, replacement, caseSensitive });
+        if (!plan.length) { this._findReplaceHint(search); return false; }
+        const forward = plan.find((m) => m.index > this.selectedWordIndex);
+        this.selectWord((forward || plan[0]).index, { seek: true });
+        return true;
+    },
+
+    /**
+     * Replace the next match after the current word (wrapping) — the
+     * step-through workflow: press Replace repeatedly and watch/hear each
+     * fixed word as it is selected. Single mutation funnel: exactly one
+     * saveState() on the committed path only.
+     */
+    replaceWordOnce({ search, replacement, caseSensitive = false } = {}) {
+        if (!this.transcript) return false;
+        const plan = planWordReplace(this.transcript.words, { search, replacement, caseSensitive });
+        if (!plan.length) { this._findReplaceHint(search); return false; }
+        const slot = plan.findIndex((m) => m.index > this.selectedWordIndex);
+        const target = slot >= 0 ? plan[slot] : plan[0];
+        const at = this.transcript.words[target.index].start;
+        this.saveState();
+        this.transcript.words[target.index].text = target.after;
+        this.rebuildLayout();
+        // selectWord re-renders editor + inspector + timeline highlight.
+        this.selectWord(target.index, { seek: true });
+        this.renderTranscriptDisplay();
+        this.updatePreview();
+        this.timeline?.invalidate();
+        Status.msg(`Replaced "${target.before}" → "${target.after}" at `
+            + `${at.toFixed(1)} s (match ${slot >= 0 ? slot + 1 : 1} of ${plan.length}).`, 'success');
+        return true;
+    },
+
+    /**
+     * Replace every match in one undo step (single mutation funnel:
+     * exactly one saveState() before any write).
+     */
+    replaceAllWords({ search, replacement, caseSensitive = false } = {}) {
+        if (!this.transcript) return false;
+        const plan = planWordReplace(this.transcript.words, { search, replacement, caseSensitive });
+        if (!plan.length) { this._findReplaceHint(search); return false; }
+        this.saveState();
+        for (const m of plan) this.transcript.words[m.index].text = m.after;
+        this.rebuildLayout();
+        this.renderTranscriptEditor();
+        this.renderTranscriptDisplay();
+        this.updateInspector();
+        this.updatePreview();
+        this.timeline?.invalidate();
+        Status.msg(`Replaced ${plan.length} × "${String(search).trim()}" → `
+            + `"${replacement}" — Ctrl+Z undoes all.`, 'success');
+        return true;
+    },
+
+    bindFindReplaceControls() {
+        const findInput = document.getElementById('find-input');
+        const replaceInput = document.getElementById('replace-input');
+        const caseBox = document.getElementById('find-case-sensitive');
+        const countEl = document.getElementById('find-count');
+        if (!findInput || !replaceInput || !caseBox || !countEl) return;
+        const opts = () => ({
+            search: findInput.value,
+            replacement: replaceInput.value,
+            caseSensitive: caseBox.checked,
+        });
+        // Live "N to replace" count + chip underline; typing the
+        // replacement too refreshes it (already-fixed words leave the set).
+        const refresh = () => {
+            const o = opts();
+            this.findMatches = planWordReplace(
+                this.transcript ? this.transcript.words : [], o).map((m) => m.index);
+            countEl.textContent = !o.search.trim() ? ''
+                : this.findMatches.length ? `${this.findMatches.length} to replace` : 'no matches';
+            this.renderTranscriptEditor();
+        };
+        this._refreshFindCount = refresh;
+        findInput.addEventListener('input', refresh);
+        replaceInput.addEventListener('input', refresh);
+        caseBox.addEventListener('change', refresh);
+        findInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); this.findNextWord(opts()); }
+            else if (e.key === 'Escape') { e.preventDefault(); findInput.blur(); }
+        });
+        document.getElementById('btn-find-next').addEventListener('click', () => this.findNextWord(opts()));
+        document.getElementById('btn-replace-once').addEventListener('click', () => {
+            if (this.replaceWordOnce(opts())) refresh();
+        });
+        document.getElementById('btn-replace-all').addEventListener('click', () => {
+            if (this.replaceAllWords(opts())) refresh();
         });
     },
 
@@ -2973,7 +3130,8 @@ const App = {
     // Map: Space play/pause · =/+ zoom in · -/_ zoom out ·
     //        i set word start at playhead · o set word end at playhead ·
     //        [ / ] move caption up/down at selected word · \ clear its jump ·
-    //        Ctrl+Z/Y undo/redo · F2 edit text · Delete remove word ·
+    //        Ctrl+Z/Y undo/redo · Ctrl+F focus find bar · Ctrl+H focus
+    //        replace field · F2 edit text · Delete remove word ·
     //        d debug overlay. Editing-in-progress (contentEditable, input,
     //        textarea, select) and modifier chords never trigger these.
     bindKeyboardShortcuts() {
@@ -3009,6 +3167,16 @@ const App = {
             } else if (e.ctrlKey && key === 'y') {
                 e.preventDefault();
                 this.redo();
+            } else if (e.ctrlKey && key === 'f') {
+                // Focus the Word Editor find bar (browser page-find is
+                // useless here — the transcript is a chip list).
+                e.preventDefault();
+                const findBox = document.getElementById('find-input');
+                if (findBox && this.transcript) { findBox.focus(); findBox.select(); }
+            } else if (e.ctrlKey && key === 'h') {
+                e.preventDefault();
+                const replBox = document.getElementById('replace-input');
+                if (replBox && this.transcript) { replBox.focus(); replBox.select(); }
             } else if (e.key === 'F2' && this.selectedWordIndex >= 0 && !isEditing) {
                 e.preventDefault();
                 this.enterTextEdit(this.selectedWordIndex);
