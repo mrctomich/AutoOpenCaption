@@ -1329,6 +1329,51 @@ select {
 
 .progress-overlay.hidden { display: none; }
 
+/* ── Modal dialog (replace-video caption question) ───────── */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0,0,0,0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 110; /* above the progress overlay's 100 */
+}
+
+.modal-overlay.hidden { display: none; }
+
+.modal-card {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-3);
+    min-width: 320px;
+    max-width: 440px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+}
+
+.modal-card h3 {
+    margin-bottom: var(--space-1);
+    color: var(--text-primary);
+    font-size: var(--text-size-base);
+}
+
+.modal-card p {
+    color: var(--text-secondary);
+    font-size: var(--text-size-sm);
+    line-height: 1.5;
+    margin-bottom: var(--space-3);
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-1);
+}
+
 .progress-card {
     background: var(--bg-panel);
     border: 1px solid var(--border);
