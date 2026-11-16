@@ -1,5 +1,5 @@
 import { FFmpegService } from './ffmpeg-service.js';
-import { whisperToTranscript } from './whisper-adapter.js';
+import { whisperToTranscript, whisperWindowCount, makeWindowProgressStreamer } from './whisper-adapter.js';
 import { groupWords, findGroupAtTime, computeLayout, drawGroup, drawDiagnostics, resolveGroupYpx, baseYpx } from './caption-renderer.js';
 import { installResumableFetch, isFileCached } from './resumable-fetch.js';
 import { loadCtcAligner, alignCtcTranscript, CtcAlignerError, CTC_MODEL_ID } from './ctc-aligner.js';
@@ -20,6 +20,13 @@ await waitForTransformers();
 
 const pipeline = window.TransformersPipeline;
 const env = window.TransformersEnv;
+
+// Whisper long-audio chunking passed to transformers.js. ONE source of
+// truth: the same values build the pipeline call AND the progress-bar
+// denominator (whisperWindowCount), so the total can never drift from the
+// windows the library actually runs.
+const TRANSCRIBE_CHUNK_LENGTH_S = 30;
+const TRANSCRIBE_STRIDE_LENGTH_S = 5;
 
 const fetchFile = async (input) => {
     if (input instanceof File || input instanceof Blob) {
@@ -1841,12 +1848,38 @@ const App = {
             const active = Status.setActive('Transcribing audio...');
 
             const tStart = performance.now();
+            // Real progress: transformers.js splits long audio into
+            // TRANSCRIBE_CHUNK_LENGTH_S-second windows (advancing by
+            // chunk - 2*stride) and runs ONE model.generate() per window.
+            // It forwards the `streamer` kwarg into every generate call and
+            // fires streamer.end() when that window finishes decoding —
+            // counting ends is the only progress signal the library gives,
+            // and it maps directly onto audio position. Token-level puts are
+            // ignored: token counts say nothing about how much AUDIO is done.
+            const windows = whisperWindowCount({
+                sampleCount: audioSamples.length,
+                chunkLengthS: TRANSCRIBE_CHUNK_LENGTH_S,
+                strideLengthS: TRANSCRIBE_STRIDE_LENGTH_S,
+                sampleRate: 16000
+            });
+            const windowEndSec = (done) => Math.min(
+                audioDuration,
+                TRANSCRIBE_CHUNK_LENGTH_S
+                    + (done - 1) * (TRANSCRIBE_CHUNK_LENGTH_S - 2 * TRANSCRIBE_STRIDE_LENGTH_S));
+            const fmtClock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+            const progressStreamer = makeWindowProgressStreamer(windows, (done, total) => {
+                if (cancelled) return;
+                Progress.update((done / total) * 85,
+                    `Transcribed ${fmtClock(windowEndSec(done))} of ${fmtClock(audioDuration)} audio ` +
+                    `(chunk ${done}/${total})`);
+            });
             const result = await whisperPipeline(audioSamples, {
                 language: language,
                 task: 'transcribe',
                 return_timestamps: 'word',
-                chunk_length_s: 30,
-                stride_length_s: 5
+                chunk_length_s: TRANSCRIBE_CHUNK_LENGTH_S,
+                stride_length_s: TRANSCRIBE_STRIDE_LENGTH_S,
+                streamer: progressStreamer
             });
             if (cancelled) throw { __cancelled: true };
             const tEnd = performance.now();
