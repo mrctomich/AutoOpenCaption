@@ -1,6 +1,6 @@
 import { FFmpegService } from './ffmpeg-service.js';
 import { whisperToTranscript } from './whisper-adapter.js';
-import { groupWords, findGroupAtTime, computeLayout, drawGroup, drawDiagnostics } from './caption-renderer.js';
+import { groupWords, findGroupAtTime, computeLayout, drawGroup, drawDiagnostics, resolveGroupYpx, baseYpx } from './caption-renderer.js';
 import { installResumableFetch, isFileCached } from './resumable-fetch.js';
 import { loadCtcAligner, alignCtcTranscript, CtcAlignerError, CTC_MODEL_ID } from './ctc-aligner.js';
 import { applyCtcResult, revertCtcResult, canCtcRealign } from './ctc-apply.js';
@@ -2256,7 +2256,8 @@ const App = {
             const needsAttention = !!word.estimated && !adjusted;
             chip.className = `word-chip ${word.deleted ? 'deleted' : ''} ${i === this.selectedWordIndex ? 'selected' : ''}`
                 + (adjusted ? ' adjusted' : needsAttention ? ' needs-attention' : '')
-                + (word.ctcAligned ? ' ctc-aligned' : '');
+                + (word.ctcAligned ? ' ctc-aligned' : '')
+                + (!word.deleted && word.captionY != null ? ' has-jump' : '');
             if (needsAttention) {
                 chip.title = 'Missing or collapsed timestamp — timing is estimated. '
                     + 'Adjust the text, start, end, split or merge this word to mark it handled.';
@@ -2267,6 +2268,10 @@ const App = {
                 chip.title = 'Word timing set by the experimental CTC aligner (from audio, not Whisper)';
             } else if (word.ctcReason) {
                 chip.title = `Experimental CTC realign skipped this word (${word.ctcReason}) — kept existing timing`;
+            }
+            if (!word.deleted && word.captionY != null) {
+                chip.title = (chip.title ? chip.title + ' — ' : '')
+                    + `Captions jump to y=${word.captionY} from this word until the next jump (press backslash key or use inspector Clear)`;
             }
             chip.dataset.index = i;
 
@@ -2418,6 +2423,24 @@ const App = {
         const mergeBtn = document.getElementById('inspector-merge');
         mergeBtn.disabled = this.selectedWordIndex >= this.transcript.words.length - 1;
 
+        // Vertical jump row: shows this word's own anchor when it has one,
+        // otherwise the inherited position as a placeholder (what the user
+        // would pin if they press Jump here).
+        const jumpInput = document.getElementById('inspector-jump-y');
+        const jumpHint = document.getElementById('inspector-jump-hint');
+        const jumpClear = document.getElementById('inspector-jump-clear');
+        const inheritedY = Math.round(this.effectiveCaptionYpx(this.selectedWordIndex));
+        if (word.captionY != null) {
+            jumpInput.value = word.captionY;
+            jumpInput.placeholder = '';
+            jumpHint.textContent = `pinned at ${word.captionY} from here`;
+        } else {
+            jumpInput.value = '';
+            jumpInput.placeholder = String(inheritedY);
+            jumpHint.textContent = `inherits ${inheritedY}`;
+        }
+        jumpClear.disabled = word.captionY == null;
+
         // Experimental CTC alignment provenance (Phase 4).
         const alignField = document.getElementById('inspector-align-field');
         const alignNote = document.getElementById('inspector-align-note');
@@ -2500,6 +2523,33 @@ const App = {
         
         document.getElementById('inspector-delete').addEventListener('click', () => {
             this.deleteWord(this.selectedWordIndex);
+        });
+
+        // Vertical jump controls route through the single setCaptionJump
+        // funnel (one saveState per real change, no-ops are free).
+        const jumpInput = document.getElementById('inspector-jump-y');
+        const commitJumpFromInput = () => {
+            if (this.selectedWordIndex < 0 || !this.transcript) return;
+            const raw = jumpInput.value !== '' ? jumpInput.value : jumpInput.placeholder;
+            this.setCaptionJump(this.selectedWordIndex, raw);
+        };
+        document.getElementById('inspector-jump-set').addEventListener('click', commitJumpFromInput);
+        jumpInput.addEventListener('change', (e) => {
+            // Empty input means "leave as inherited" — only numbers commit.
+            if (e.target.value === '') return;
+            commitJumpFromInput();
+        });
+        jumpInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); jumpInput.blur(); }
+            else if (e.key === 'Escape') {
+                e.preventDefault();
+                this.updateInspector();
+                jumpInput.blur();
+            }
+        });
+        document.getElementById('inspector-jump-clear').addEventListener('click', () => {
+            if (this.selectedWordIndex < 0 || !this.transcript) return;
+            this.setCaptionJump(this.selectedWordIndex, null);
         });
     },
 
@@ -2584,10 +2634,109 @@ const App = {
         this.updatePreview();
     },
 
+    /**
+     * Anchor a vertical JUMP at a word: word.captionY (1080p reference px,
+     * same scale as the global Position slider). The cue containing this
+     * word — and every cue after it — draws at that height until the next
+     * anchored word; null removes this word's anchor. Jumps are word DATA,
+     * not style, so they survive preset switches and live in the transcript
+     * undo snapshots. Single mutation funnel: exactly one saveState(),
+     * gated on a real value change (no-op edits never burn an undo slot).
+     */
+    setCaptionJump(index, yPxOrNull) {
+        if (!this.transcript) return false;
+        const word = this.transcript.words[index];
+        if (!word) return false;
+
+        let value = null;
+        if (yPxOrNull != null) {
+            const n = Math.round(Number(yPxOrNull));
+            if (!Number.isFinite(n)) {
+                Status.msg('Vertical jump needs a number between 0 (top) and 1080 (bottom).');
+                return false;
+            }
+            value = Math.min(1080, Math.max(0, n));
+        }
+        const current = word.captionY != null ? word.captionY : null;
+        if (current === value) return false; // no-op: no undo slot, no refresh
+
+        this.saveState();
+        if (value == null) delete word.captionY;
+        else word.captionY = value;
+
+        this.rebuildLayout();            // re-resolves per-group yPx (lanes refresh too)
+        this.renderTranscriptEditor();   // chip jump marker
+        this.updateInspector();
+        this.updatePreview();
+        Status.msg(value == null
+            ? `Jump cleared at "${word.text}" — captions inherit the previous position.`
+            : `Captions jump to y=${value} from "${word.text}" until the next jump.`);
+        return true;
+    },
+
+    // Effective caption height (1080p reference px) at a word: the last
+    // live jump anchor at or before it, else the global Position value.
+    // Same walk resolveGroupYpx does, from the word's point of view.
+    effectiveCaptionYpx(index) {
+        const words = (this.transcript && this.transcript.words) || [];
+        for (let i = Math.min(index, words.length - 1); i >= 0; i--) {
+            const w = words[i];
+            if (w && !w.deleted && w.captionY != null) return w.captionY;
+        }
+        return baseYpx(this.style);
+    },
+
+    // [ / ] — nudge the selected word's caption up/down in the 1080p
+    // reference frame. Creates the anchor from the effective position when
+    // the word only inherits one. Step sized so ~9 taps cross the frame.
+    nudgeCaptionJump(delta) {
+        const index = this.selectedWordIndex;
+        if (!this.transcript || index < 0) {
+            Status.msg('Select a word first — [ / ] move the caption up/down from there.');
+            return;
+        }
+        const word = this.transcript.words[index];
+        if (!word) return;
+        const base = word.captionY != null ? word.captionY : this.effectiveCaptionYpx(index);
+        const target = Math.min(1080, Math.max(0, base + delta));
+        if (word.captionY != null && target === word.captionY) {
+            Status.msg(target === 0 ? 'Caption is already at the very top.'
+                                    : 'Caption is already at the very bottom.');
+            return;
+        }
+        this.setCaptionJump(index, target);
+    },
+
+    clearCaptionJumpAtSelection() {
+        const index = this.selectedWordIndex;
+        if (!this.transcript || index < 0) {
+            Status.msg('Select a word first — \\ clears its vertical jump.');
+            return;
+        }
+        if (this.transcript.words[index]?.captionY == null) {
+            Status.msg('This word has no vertical jump to clear.');
+            return;
+        }
+        this.setCaptionJump(index, null);
+    },
+
     deleteWord(index) {
         if (!this.transcript) return;
         this.saveState();
-        this.transcript.words[index].deleted = true;
+        const word = this.transcript.words[index];
+        // A jump anchored at a removed word would silently vanish from the
+        // chain — hand it to the next live word so the caption stays where
+        // the user put it.
+        if (word && word.captionY != null) {
+            for (let i = index + 1; i < this.transcript.words.length; i++) {
+                const next = this.transcript.words[i];
+                if (next && !next.deleted) {
+                    next.captionY = word.captionY;
+                    break;
+                }
+            }
+        }
+        if (word) word.deleted = true;
         this.selectedWordIndex = -1;
         this.rebuildLayout();
         this.renderTranscriptEditor();
@@ -2707,6 +2856,7 @@ const App = {
     // ── Keyboard Shortcuts ──────────────────────────────────
     // Map: Space play/pause · =/+ zoom in · -/_ zoom out ·
     //        i set word start at playhead · o set word end at playhead ·
+    //        [ / ] move caption up/down at selected word · \ clear its jump ·
     //        Ctrl+Z/Y undo/redo · F2 edit text · Delete remove word ·
     //        d debug overlay. Editing-in-progress (contentEditable, input,
     //        textarea, select) and modifier chords never trigger these.
@@ -2769,6 +2919,15 @@ const App = {
                 } else if (key === 'd') {
                     this.debugOverlay = !this.debugOverlay;
                     this.updatePreview();
+                } else if (key === '[') {
+                    e.preventDefault();
+                    this.nudgeCaptionJump(-60);
+                } else if (key === ']') {
+                    e.preventDefault();
+                    this.nudgeCaptionJump(60);
+                } else if (key === '\\') {
+                    e.preventDefault();
+                    this.clearCaptionJumpAtSelection();
                 }
             }
         });

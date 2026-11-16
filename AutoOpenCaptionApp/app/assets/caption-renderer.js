@@ -73,6 +73,43 @@ export function findGroupAtTime(groups, time) {
     return -1;
 }
 
+// Global caption baseline in the 1080p reference frame (0 = very top,
+// 1080 = very bottom). Older presets stored {placement, offsetPx} with
+// offset measured from the bottom — migrate.
+export function baseYpx(style) {
+    const pos = (style && style.position) || {};
+    let yPx = pos.yPx;
+    if (yPx == null) {
+        yPx = pos.placement === 'bottom' ? 1080 - (pos.offsetPx ?? 220)
+            : pos.placement === 'top' ? (pos.offsetPx ?? 100)
+            : 540;
+    }
+    return Math.min(1080, Math.max(0, yPx));
+}
+
+/**
+ * Effective vertical position (1080p reference px) per caption group.
+ * A word may carry `captionY` — a vertical JUMP anchor: the group that
+ * contains it (and every later group) draws at that height until the
+ * next anchor word. Groups never move mid-cue; a jump takes effect when
+ * the anchor's group first appears, which matches how word-anchored
+ * captions are read. Words without an anchor inherit the last one, or
+ * the global style position before the first anchor.
+ */
+export function resolveGroupYpx(groups, style) {
+    const ys = [];
+    let cur = baseYpx(style);
+    for (const group of groups) {
+        for (const w of group.words) {
+            if (w.captionY != null) {
+                cur = Math.min(1080, Math.max(0, w.captionY));
+            }
+        }
+        ys.push(cur);
+    }
+    return ys;
+}
+
 function measureWord(ctx, text, fontSize, font, bold) {
     ctx.font = `${bold ? 'bold ' : ''}${fontSize}px ${font}`;
     return ctx.measureText(text).width;
@@ -88,20 +125,12 @@ export function computeLayout(groups, style, canvasWidth, canvasHeight) {
     const activeFontSize = canvasHeight * (style.activeSize / 1080);
     const wordGap = fontSize * 0.3;
 
-    // Vertical position: yPx is the caption baseline measured in a 1080p
-    // reference frame (0 = very top, 1080 = very bottom). Older presets stored
-    // {placement, offsetPx} with offset measured from the bottom — migrate.
-    const pos = style.position || {};
-    let yPx = pos.yPx;
-    if (yPx == null) {
-        yPx = pos.placement === 'bottom' ? 1080 - (pos.offsetPx ?? 220)
-            : pos.placement === 'top' ? (pos.offsetPx ?? 100)
-            : 540;
-    }
-    yPx = Math.min(1080, Math.max(0, yPx));
-    const y = canvasHeight * (yPx / 1080);
+    // Per-group vertical position: global baseline with word-anchored
+    // jumps layered on top (see resolveGroupYpx).
+    const groupYpx = resolveGroupYpx(groups, style);
 
     return groups.map((group, groupIndex) => {
+        const y = canvasHeight * (groupYpx[groupIndex] / 1080);
         const wordLayouts = group.words.map((word) => {
             const normalW = measureWord(ctx, word.text, fontSize, style.font, false);
             const activeW = measureWord(ctx, word.text, activeFontSize, style.font, style.activeWordBold);
@@ -153,6 +182,7 @@ export function computeLayout(groups, style, canvasWidth, canvasHeight) {
             layouts: finalLayouts,
             x: (canvasWidth - totalWidth * scale) / 2,
             y: y,
+            yPx: groupYpx[groupIndex],
             totalWidth: totalWidth * scale,
             scale: scale,
             fontSize: scaledFontSize,

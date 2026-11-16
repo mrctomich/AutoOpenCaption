@@ -190,6 +190,14 @@
                                 <button id="inspector-end-plus" class="btn-nudge" title="+0.05s">+</button>
                             </div>
                         </div>
+                        <div class="inspector-field">
+                            <label>Vertical Jump <span class="inspector-jump-hint" id="inspector-jump-hint"></span></label>
+                            <div class="inspector-time-row">
+                                <input type="number" id="inspector-jump-y" class="inspector-time-input" step="10" min="0" max="1080" title="Caption height in the 1080p reference frame (0 = top, 1080 = bottom)" />
+                                <button id="inspector-jump-set" class="btn-secondary btn-jump" title="Pin captions to this height from this word until the next jump">Jump here</button>
+                                <button id="inspector-jump-clear" class="btn-secondary btn-jump" title="Remove the jump anchored at this word">Clear</button>
+                            </div>
+                        </div>
                         <div class="inspector-align-note hidden" id="inspector-align-field">
                             <span id="inspector-align-note"></span>
                         </div>
@@ -295,6 +303,7 @@
                             <input type="number" id="range-offset-num" min="0" max="1080" value="780">
                         </div>
                     </label>
+                    <p class="panel-hint">To dodge on-screen content, select a word and use its inspector's Vertical Jump row (or [ / ] keys) — captions move here from that word until the next jump.</p>
                 </div>
             </section>
 
