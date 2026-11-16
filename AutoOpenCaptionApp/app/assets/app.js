@@ -1025,6 +1025,39 @@ const App = {
             Status.warning(`${transcript.timing.clampedCues} caption ${transcript.timing.clampedCues === 1 ? 'block' : 'blocks'} overlapped the previous one — shifted forward so captions never overlap.`);
         }
         Status.warning('Word timings inside imported caption blocks are estimated (red outlines) — adjust a word or let the estimated timing stand, captions still show for the whole block.');
+
+        // The timeline waveform needs decoded audio, which only the
+        // transcription path used to produce. Decode it in the background
+        // so imported captions get the same waveform (and any transcribe
+        // later just re-decodes for itself). Fire-and-forget: a video
+        // without a decodable audio track must never fail an import.
+        this.buildImportedWaveform();
+    },
+
+    async buildImportedWaveform() {
+        const file = this.videoFile;
+        if (!file || this._waveformBuild) return; // one decode at a time
+        this._waveformBuild = true;
+        try {
+            if (!FFmpegService.isLoaded) {
+                Status.msg('Loading FFmpeg to build the waveform...');
+                await FFmpegService.init();
+            }
+            // extractAudio() owns its Progress overlay and hides it when
+            // done (same path transcription uses).
+            const { samples } = await this.extractAudio();
+            // Video swapped, transcribe took over, or the transcript was
+            // discarded while decoding: whoever owns _audioCache now wins.
+            if (this.videoFile !== file || this._transcribeRunning || !this.transcript) return;
+            this._audioCache = { samples, file };
+            this.buildWaveformPeaks();
+            Status.msg('Waveform ready — audio decoded from the video.');
+        } catch (err) {
+            Progress.hide(); // extraction may have died with the overlay up
+            Status.warning(`Waveform skipped — could not decode audio from the video (${err.message}). Captions are unaffected.`);
+        } finally {
+            this._waveformBuild = false;
+        }
     },
 
     // The import-restriction modal: resolves true (Import) or false

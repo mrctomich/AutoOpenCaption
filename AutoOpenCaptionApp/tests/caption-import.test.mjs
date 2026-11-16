@@ -189,6 +189,7 @@ async function runLoadCaptionFile({
         updateDiagnostics() { calls.push('updateDiagnostics'); },
         updateInspector() { calls.push('updateInspector'); },
         updateCtcUi() { calls.push('updateCtcUi'); },
+        buildImportedWaveform() { calls.push('buildImportedWaveform'); },
         async askCaptionImport() { calls.push('askCaptionImport'); return confirmAnswer; },
     };
     const Status = {
@@ -265,6 +266,8 @@ test('confirmed import: commit order, undo reset, gates and pipeline', async () 
     assert.equal(els['btn-generate'].disabled, false);
     assert.ok(calls.some(c => c[0] === 'pipeline.complete' && c[1] === 'transcribe'));
     assert.ok(calls.some(c => c[0] === 'pipeline.complete' && c[1] === 'edit'));
+    assert.ok(calls.includes('buildImportedWaveform'),
+        'committed import must kick off the background waveform decode');
     assert.ok(calls.some(c => Array.isArray(c) && c[0] === 'status.success' && /1 captions \(1 words\)/.test(c[1])));
     assert.ok(calls.some(c => Array.isArray(c) && c[0] === 'status.warning' && /estimated/.test(c[1])),
         'the estimated-timing warning must fire after import');
@@ -319,7 +322,100 @@ test('askCaptionImport: opens modal, fills detail, focuses Import', async () => 
     assert.equal(log.length, logLen, 'already-answered modal must not touch the DOM again');
 });
 
-// ── 7. Wiring source-guards ───────────────────────────────────────────
+// ── 7. Background waveform decode (REAL extracted buildImportedWaveform)
+
+const wfBody = (() => {
+    const sig = 'async buildImportedWaveform() {';
+    const start = appSrc.indexOf(sig);
+    assert.ok(start >= 0, 'App.buildImportedWaveform signature not found in app.js');
+    return appSrc.slice(start + sig.length, appSrc.indexOf('\n    },', start));
+})();
+
+function wfEnv({ extractImpl, videoSwapDuringDecode = false, transcribeDuringDecode = false,
+    discardDuringDecode = false, FFmpegLoaded = true } = {}) {
+    const calls = [];
+    const file = { name: 'movie.mp4' };
+    const stub = {
+        videoFile: file,
+        transcript: { words: [1] },
+        _transcribeRunning: false,
+        _audioCache: null,
+        buildWaveformPeaks() { calls.push('buildWaveformPeaks'); },
+        async extractAudio() {
+            calls.push('extractAudio');
+            if (videoSwapDuringDecode) stub.videoFile = { name: 'other.mp4' };
+            if (transcribeDuringDecode) stub._transcribeRunning = true;
+            if (discardDuringDecode) stub.transcript = null;
+            if (extractImpl) return extractImpl();
+            return { samples: new Float32Array(4), duration: 0.00025 };
+        },
+    };
+    const FFmpegService = {
+        isLoaded: FFmpegLoaded,
+        async init() { calls.push('ffmpeg.init'); },
+    };
+    const Status = {
+        msg(m) { calls.push(['status.msg', m]); },
+        warning(m) { calls.push(['status.warning', m]); },
+    };
+    const Progress = { hide() { calls.push('progress.hide'); } };
+    const fn = new Function('FFmpegService', 'Status', 'Progress',
+        `return async function () {${wfBody}};`)(FFmpegService, Status, Progress);
+    return { calls, stub, run: () => fn.call(stub) };
+}
+
+test('waveform decode: happy path caches audio and builds peaks', async () => {
+    const env = wfEnv();
+    await env.run();
+    assert.ok(env.calls.includes('extractAudio'));
+    assert.ok(env.calls.includes('buildWaveformPeaks'));
+    assert.ok(env.stub._audioCache, '_audioCache filled');
+    assert.equal(env.stub._waveformBuild, false, 're-entrancy flag released');
+    assert.ok(env.calls.some(c => Array.isArray(c) && c[0] === 'status.msg' && /Waveform ready/.test(c[1])));
+});
+
+test('waveform decode: FFmpeg is initialised only when not already loaded', async () => {
+    const cold = wfEnv({ FFmpegLoaded: false });
+    await cold.run();
+    assert.ok(cold.calls.includes('ffmpeg.init'));
+    const warm = wfEnv({ FFmpegLoaded: true });
+    await warm.run();
+    assert.ok(!warm.calls.includes('ffmpeg.init'));
+});
+
+test('waveform decode: results are DROPPED when the video swaps mid-decode', async () => {
+    const env = wfEnv({ videoSwapDuringDecode: true });
+    await env.run();
+    assert.equal(env.stub._audioCache, null, 'stale decode must not poison the new video');
+    assert.ok(!env.calls.includes('buildWaveformPeaks'));
+});
+
+test('waveform decode: transcribe takeover and discarded transcript also drop it', async () => {
+    const t = wfEnv({ transcribeDuringDecode: true });
+    await t.run();
+    assert.equal(t.stub._audioCache, null);
+    const d = wfEnv({ discardDuringDecode: true });
+    await d.run();
+    assert.equal(d.stub._audioCache, null);
+});
+
+test('waveform decode: failure warns, never throws, releases the flag', async () => {
+    const env = wfEnv({ extractImpl: () => { throw new Error('no audio stream'); } });
+    await env.run(); // must not reject
+    assert.ok(env.calls.includes('progress.hide'), 'overlay cannot be left up');
+    assert.ok(env.calls.some(c => Array.isArray(c) && c[0] === 'status.warning'
+        && /Waveform skipped/.test(c[1]) && /Captions are unaffected/.test(c[1])));
+    assert.equal(env.stub._waveformBuild, false);
+});
+
+test('waveform decode: second call while one is running is ignored', async () => {
+    const env = wfEnv();
+    env.stub._waveformBuild = true;
+    await env.run();
+    assert.ok(!env.calls.includes('extractAudio'));
+});
+
+// ── 8. Wiring source-guards ───────────────────────────────────────────
 
 test('index.html carries the Import Captions button (disabled until a video loads)', () => {
     const html = readFileSync(
