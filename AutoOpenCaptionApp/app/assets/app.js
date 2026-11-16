@@ -664,6 +664,10 @@ const App = {
             .addEventListener('click', () => this.resolveCaptionChoice('clear'));
         document.getElementById('btn-modal-cancel-load')
             .addEventListener('click', () => this.resolveCaptionChoice(null));
+        document.getElementById('btn-modal-import-ok')
+            .addEventListener('click', () => this.resolveCaptionImport(true));
+        document.getElementById('btn-modal-import-cancel')
+            .addEventListener('click', () => this.resolveCaptionImport(false));
 
         this.bindStyleControls();
     },
@@ -943,6 +947,7 @@ const App = {
     // restriction notice, then commits the transcript behind the same
     // UI-update sequence a finished transcription runs.
     importCaptions() {
+        if (this._captionImportResolve) return; // restriction modal already open
         if (!this.videoFile) {
             Status.warning('Load a video first — imported captions need a video to time against.');
             return;
@@ -978,19 +983,12 @@ const App = {
         }
 
         // Restriction notice BEFORE replacing anything (parse already ran,
-        // so the cue count quoted here is real). Cancel leaves the current
-        // video and captions completely untouched.
+        // so the cue count quoted in the modal is real). Cancel/Escape
+        // leaves the current video and captions completely untouched.
+        // A styled modal, not native confirm(): the dialog is sized to the
+        // whole message, so nothing hides behind a scrollbar.
         const replacing = !!(this.transcript && this.transcript.words.length);
-        const ok = confirm(
-            `Import ${parsed.cues.length} caption${parsed.cues.length === 1 ? '' : 's'} from "${file.name}"` +
-            (replacing ? ` and REPLACE the current captions` : '') + '?\n\n' +
-            'Caption files only store timing for whole caption blocks, never per word:\n' +
-            '  \u2022 Word timing inside each block will be ESTIMATED (red-outlined words).\n' +
-            '  \u2022 Captions are re-wrapped by this app\u2019s line-grouping rules, which may\n' +
-            '    break lines differently than the original file.\n' +
-            '  \u2022 Text and timing stay fully editable; exports use your edits.\n' +
-            '  \u2022 "Realign timing" (CTC aligner) is not available for imported files.'
-        );
+        const ok = await this.askCaptionImport(parsed, file, replacing);
         if (!ok) return;
 
         const transcript = buildImportedTranscript(parsed, { sourceFile: file.name });
@@ -1027,6 +1025,30 @@ const App = {
             Status.warning(`${transcript.timing.clampedCues} caption ${transcript.timing.clampedCues === 1 ? 'block' : 'blocks'} overlapped the previous one — shifted forward so captions never overlap.`);
         }
         Status.warning('Word timings inside imported caption blocks are estimated (red outlines) — adjust a word or let the estimated timing stand, captions still show for the whole block.');
+    },
+
+    // The import-restriction modal: resolves true (Import) or false
+    // (Cancel/Escape). Buttons are wired in bindEvents; Escape goes through
+    // the modal keyboard guard in bindKeyboardShortcuts. Same Promise-
+    // ownership shape as askCaptionReplacement.
+    askCaptionImport(parsed, file, replacing) {
+        return new Promise((resolve) => {
+            this._captionImportResolve = resolve;
+            document.getElementById('modal-import-detail').textContent =
+                `Import ${parsed.cues.length} caption${parsed.cues.length === 1 ? '' : 's'} from "${file.name}"` +
+                (replacing ? ' and REPLACE the current captions' : '') + '? ' +
+                'Caption files time whole caption blocks, never individual words:';
+            document.getElementById('modal-import-captions').classList.remove('hidden');
+            document.getElementById('btn-modal-import-ok').focus();
+        });
+    },
+
+    resolveCaptionImport(answer) {
+        if (!this._captionImportResolve) return; // already answered — no double-resolve
+        document.getElementById('modal-import-captions').classList.add('hidden');
+        const resolve = this._captionImportResolve;
+        this._captionImportResolve = null;
+        resolve(answer);
     },
 
     // ── Timeline dock ───────────────────────────────────────
@@ -3237,14 +3259,22 @@ const App = {
     //        textarea, select) and modifier chords never trigger these.
     bindKeyboardShortcuts() {
         document.addEventListener('keydown', (e) => {
-            // While the replace-video caption modal is open it owns the
-            // keyboard: Escape cancels the load, every other key is swallowed
-            // so shortcuts can't act on the still-loaded project underneath.
+            // While a caption modal is open it owns the keyboard: Escape
+            // cancels it, every other key is swallowed so shortcuts can't
+            // act on the still-loaded project underneath.
             const replaceModal = document.getElementById('modal-replace-captions');
             if (replaceModal && !replaceModal.classList.contains('hidden')) {
                 if (e.key === 'Escape') {
                     e.preventDefault();
                     this.resolveCaptionChoice(null);
+                }
+                return;
+            }
+            const importModal = document.getElementById('modal-import-captions');
+            if (importModal && !importModal.classList.contains('hidden')) {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    this.resolveCaptionImport(false);
                 }
                 return;
             }

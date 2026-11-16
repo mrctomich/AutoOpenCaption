@@ -189,6 +189,7 @@ async function runLoadCaptionFile({
         updateDiagnostics() { calls.push('updateDiagnostics'); },
         updateInspector() { calls.push('updateInspector'); },
         updateCtcUi() { calls.push('updateCtcUi'); },
+        async askCaptionImport() { calls.push('askCaptionImport'); return confirmAnswer; },
     };
     const Status = {
         error(m) { calls.push(['status.error', m]); },
@@ -197,7 +198,6 @@ async function runLoadCaptionFile({
     };
     const document = { getElementById: el };
     const Pipeline = { complete(s) { calls.push(['pipeline.complete', s]); } };
-    const confirm = () => { calls.push('confirm'); return confirmAnswer; };
     const parseCaptionFile = parseImpl ?? ((t) => {
         if (t.includes('GARBAGE')) throw new Error('no caption cues found');
         return { format: 'srt', cues: [{ start: 1, end: 2, text: 'Hi' }] };
@@ -208,22 +208,22 @@ async function runLoadCaptionFile({
         sourceFile: opts.sourceFile,
     }));
     const fn = new Function(
-        'parseCaptionFile', 'buildImportedTranscript', 'Status', 'document', 'Pipeline', 'confirm',
+        'parseCaptionFile', 'buildImportedTranscript', 'Status', 'document', 'Pipeline',
         `return async function (file) {${body}};`,
-    )(parseCaptionFile, buildImportedTranscript, Status, document, Pipeline, confirm);
+    )(parseCaptionFile, buildImportedTranscript, Status, document, Pipeline);
     const file = { name: 'subs.srt', text: async () => fileText };
     await fn.call(stub, file);
     return { stub, calls, els };
 }
 
-test('parse failure: Status.error, never reaches the consent dialog', async () => {
+test('parse failure: Status.error, never reaches the restriction modal', async () => {
     const before = { words: [{ id: 'old', text: 'keep me' }] };
     const { stub, calls } = await runLoadCaptionFile({
         fileText: 'GARBAGE', transcript: before,
     });
     assert.equal(stub.transcript, before, 'existing transcript must survive');
     assert.ok(calls.some(c => Array.isArray(c) && c[0] === 'status.error' && /no caption cues/.test(c[1])));
-    assert.ok(!calls.includes('confirm'), 'consent dialog must not open on a dead file');
+    assert.ok(!calls.includes('askCaptionImport'), 'modal must not open on a dead file');
 });
 
 test('consent cancelled: nothing is mutated at all', async () => {
@@ -231,11 +231,17 @@ test('consent cancelled: nothing is mutated at all', async () => {
     const { stub, calls } = await runLoadCaptionFile({
         transcript: before, confirmAnswer: false,
     });
-    assert.ok(calls.includes('confirm'));
+    assert.ok(calls.includes('askCaptionImport'));
     assert.equal(stub.transcript, before);
     assert.equal(stub.undoStack.length, 1);
     assert.ok(!calls.some(c => Array.isArray(c) && c[0] === 'pipeline.complete'));
     assert.ok(!calls.some(c => Array.isArray(c) && c[0] === 'status.success'));
+});
+
+test('loadCaptionFile uses the styled modal, never native confirm()', () => {
+    const codeOnly = body.replace(/\/\/.*$/gm, ''); // comments may mention confirm()
+    assert.ok(!/\bconfirm\(/.test(codeOnly),
+        'native confirm() scrolls on small windows — the modal owns the notice');
 });
 
 test('confirmed import: commit order, undo reset, gates and pipeline', async () => {
@@ -264,7 +270,56 @@ test('confirmed import: commit order, undo reset, gates and pipeline', async () 
         'the estimated-timing warning must fire after import');
 });
 
-// ── 6. Wiring source-guards ───────────────────────────────────────────
+// ── 6. The restriction modal itself (REAL extracted ask/resolve) ──────
+
+function extractMethod(signature) {
+    const start = appSrc.indexOf(signature);
+    assert.ok(start >= 0, `signature not found: ${signature}`);
+    return appSrc.slice(start + signature.length, appSrc.indexOf('\n    },', start));
+}
+
+function modalEnv() {
+    const log = [];
+    const mk = (id) => ({
+        id, textContent: '',
+        classList: {
+            add(c) { log.push([id, 'add', c]); },
+            remove(c) { log.push([id, 'remove', c]); },
+        },
+        focus() { log.push([id, 'focus']); },
+    });
+    const els = {};
+    return {
+        log,
+        stub: {},
+        document: { getElementById: (id) => (els[id] ??= mk(id)) },
+    };
+}
+
+test('askCaptionImport: opens modal, fills detail, focuses Import', async () => {
+    const bodyAsk = extractMethod('askCaptionImport(parsed, file, replacing) {');
+    const { log, stub, document } = modalEnv();
+    const fn = new Function('document', `return function (parsed, file, replacing) {${bodyAsk}};`)(document);
+    const pending = fn.call(stub, { cues: [1, 2] }, { name: 'a b.srt' }, true);
+    assert.match(stub._captionImportResolve.constructor.name, /Function/);
+    const detail = document.getElementById('modal-import-detail').textContent;
+    assert.match(detail, /Import 2 captions from "a b\.srt" and REPLACE the current captions\?/);
+    assert.ok(log.some(l => l[0] === 'modal-import-captions' && l[1] === 'remove' && l[2] === 'hidden'));
+    assert.ok(log.some(l => l[0] === 'btn-modal-import-ok' && l[1] === 'focus'));
+    // answer it via the extracted resolver — the PROMISE carries the answer
+    const bodyRes = extractMethod('resolveCaptionImport(answer) {');
+    const res = new Function('document', `return function (answer) {${bodyRes}};`)(document);
+    res.call(stub, true);
+    assert.equal(await pending, true);
+    assert.ok(log.some(l => l[0] === 'modal-import-captions' && l[1] === 'add' && l[2] === 'hidden'));
+    assert.equal(stub._captionImportResolve, null);
+    // double-resolve is a no-op (guard returns before touching the DOM)
+    const logLen = log.length;
+    res.call(stub, false);
+    assert.equal(log.length, logLen, 'already-answered modal must not touch the DOM again');
+});
+
+// ── 7. Wiring source-guards ───────────────────────────────────────────
 
 test('index.html carries the Import Captions button (disabled until a video loads)', () => {
     const html = readFileSync(
@@ -273,7 +328,19 @@ test('index.html carries the Import Captions button (disabled until a video load
     assert.match(html, /id="btn-import-captions"[^>]*disabled[^>]*>Import Captions</);
 });
 
-test('app.js wiring: binding, file types, enable-on-video, tooltips', () => {
+test('index.html carries the restriction modal with all four notices', () => {
+    const html = readFileSync(
+        fileURLToPath(new URL('../app/index.html', import.meta.url)), 'utf8',
+    );
+    assert.match(html, /id="modal-import-captions" class="modal-overlay hidden"/);
+    assert.match(html, /id="btn-modal-import-ok" class="btn-primary">Import</);
+    assert.match(html, /id="btn-modal-import-cancel" class="btn-secondary">Cancel</);
+    const li = html.match(/<ul id="modal-import-restrictions">[\s\S]*?<\/ul>/);
+    assert.ok(li, 'restrictions list missing');
+    assert.equal((li[0].match(/<li>/g) ?? []).length, 4);
+});
+
+test('app.js wiring: binding, file types, enable-on-video, tooltips, Escape guard', () => {
     assert.match(appSrc,
         /document\.getElementById\('btn-import-captions'\)\.addEventListener\('click', \(\) => this\.importCaptions\(\)\);/);
     assert.match(appSrc, /input\.accept = '\.srt,\.vtt';/);
@@ -283,4 +350,11 @@ test('app.js wiring: binding, file types, enable-on-video, tooltips', () => {
         'chip tooltip must distinguish imported-file estimates');
     assert.match(appSrc, /this\.transcript\.imported/,
         'CTC realign tooltip must explain imported transcripts');
+    // modal buttons wired, and Escape owns the keyboard while it is open
+    assert.match(appSrc,
+        /document\.getElementById\('btn-modal-import-ok'\)\s*\n?\s*\.addEventListener\('click', \(\) => this\.resolveCaptionImport\(true\)\);/);
+    assert.match(appSrc,
+        /const importModal = document\.getElementById\('modal-import-captions'\);/,);
+    assert.match(appSrc,
+        /if \(importModal && !importModal\.classList\.contains\('hidden'\)\) \{[\s\S]{0,160}this\.resolveCaptionImport\(false\);/);
 });
