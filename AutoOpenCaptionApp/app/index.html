@@ -448,6 +448,21 @@
         </div>
     </div>
 
+    <!-- Replace-video caption question: shown by loadVideo when a transcript
+         is still loaded. Keep carries captions over, Start fresh discards
+         them, Cancel aborts the load (Escape also cancels). -->
+    <div id="modal-replace-captions" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-replace-title">
+        <div class="modal-card">
+            <h3 id="modal-replace-title">Existing captions found</h3>
+            <p id="modal-replace-detail"></p>
+            <div class="modal-actions">
+                <button id="btn-modal-cancel-load" class="btn-secondary">Cancel</button>
+                <button id="btn-modal-clear-captions" class="btn-secondary btn-danger">Start fresh</button>
+                <button id="btn-modal-keep-captions" class="btn-primary">Keep captions</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Transformers.js: load as module and expose globals -->
     <script type="module">
         import * as Transformers from './assets/transformers.umd.js';

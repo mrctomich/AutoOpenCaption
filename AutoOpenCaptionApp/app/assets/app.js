@@ -606,6 +606,15 @@ const App = {
         });
 
         dropZone.addEventListener('click', () => this.importVideo());
+
+        // Replace-video caption question (modal shown by loadVideo).
+        document.getElementById('btn-modal-keep-captions')
+            .addEventListener('click', () => this.resolveCaptionChoice('keep'));
+        document.getElementById('btn-modal-clear-captions')
+            .addEventListener('click', () => this.resolveCaptionChoice('clear'));
+        document.getElementById('btn-modal-cancel-load')
+            .addEventListener('click', () => this.resolveCaptionChoice(null));
+
         this.bindStyleControls();
     },
 
@@ -786,7 +795,81 @@ const App = {
         input.click();
     },
 
-    loadVideo(file) {
+    /**
+     * Entry point for both video-import paths (Import button + drag & drop).
+     * A loaded transcript belongs to the PREVIOUS video, so before swapping
+     * the video the user is asked what should happen to its captions:
+     * 'keep' carries them over, 'clear' discards them, Cancel aborts the
+     * swap entirely (current video and captions stay untouched). With no
+     * transcript loaded there is nothing to ask.
+     */
+    async loadVideo(file) {
+        if (this._captionChoiceResolve) return; // modal already open — ignore extra loads
+        if (this.transcript && this.transcript.words.length > 0) {
+            const choice = await this.askCaptionReplacement(file);
+            if (!choice) return; // Cancel: leave the current video + captions alone
+            if (choice === 'clear') this.clearCaptions();
+        }
+        this.applyVideoLoad(file);
+    },
+
+    // The replace-video question modal: resolves 'keep', 'clear' or null
+    // (Cancel). Buttons are wired in bindEvents; Escape is handled by the
+    // guarded early-return in bindKeyboardShortcuts.
+    askCaptionReplacement(incomingFile) {
+        return new Promise((resolve) => {
+            this._captionChoiceResolve = resolve;
+            const oldName = this.videoFile ? this.videoFile.name : 'the previous video';
+            document.getElementById('modal-replace-detail').textContent =
+                `Captions from "${oldName}" (${this.transcript.words.length} words) are still loaded. ` +
+                `Load "${incomingFile.name}" keeping them, or start fresh?`;
+            document.getElementById('modal-replace-captions').classList.remove('hidden');
+            document.getElementById('btn-modal-keep-captions').focus();
+        });
+    },
+
+    resolveCaptionChoice(choice) {
+        if (!this._captionChoiceResolve) return; // already answered — no double-resolve
+        document.getElementById('modal-replace-captions').classList.add('hidden');
+        const resolve = this._captionChoiceResolve;
+        this._captionChoiceResolve = null;
+        resolve(choice);
+    },
+
+    /**
+     * Discard the transcript and every derived state, mirroring the app's
+     * pre-transcription shape: empty editor/lane, hidden inspector and CTC
+     * buttons, export/generate disabled, undo/redo emptied, pipeline chips
+     * rewound. Called by loadVideo when the user chooses 'Start fresh'.
+     */
+    clearCaptions() {
+        this.transcript = null;
+        this.transcriptMeta = { model: null, processingTime: null, audioSamples: null, audioDuration: null };
+        this.undoStack = [];
+        this.redoStack = [];
+        this.selectedWordIndex = -1;
+        this._ctcSnapshot = null;
+        this.rebuildLayout();          // groups/layout → [] + timeline Add-button state
+        this.renderTranscriptEditor();
+        this.renderTranscriptDisplay();
+        this.updateDiagnostics();
+        this.updateInspector();        // hides the inspector
+        this.updateCtcUi();            // hides CTC realign/revert
+        this.timeline?.invalidate();
+        // The preview canvas still holds the last painted frame — wipe it so
+        // stale captions don't linger over the old video before the new loads.
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.highlightActiveWord(null);
+        document.getElementById('btn-export-srt').disabled = true;
+        document.getElementById('btn-export-vtt').disabled = true;
+        document.getElementById('btn-generate').disabled = true;
+        Pipeline.undo('transcribe');
+        Pipeline.undo('edit');
+        Pipeline.undo('export');
+        Status.msg('Existing captions discarded — starting fresh.');
+    },
+
+    applyVideoLoad(file) {
         const url = URL.createObjectURL(file);
         this.video.src = url;
         this.videoFile = file;
@@ -2862,6 +2945,17 @@ const App = {
     //        textarea, select) and modifier chords never trigger these.
     bindKeyboardShortcuts() {
         document.addEventListener('keydown', (e) => {
+            // While the replace-video caption modal is open it owns the
+            // keyboard: Escape cancels the load, every other key is swallowed
+            // so shortcuts can't act on the still-loaded project underneath.
+            const replaceModal = document.getElementById('modal-replace-captions');
+            if (replaceModal && !replaceModal.classList.contains('hidden')) {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    this.resolveCaptionChoice(null);
+                }
+                return;
+            }
             const ae = document.activeElement;
             const tag = ae?.tagName;
             // Only TEXT-like inputs block shortcuts. Range (scrubber),
