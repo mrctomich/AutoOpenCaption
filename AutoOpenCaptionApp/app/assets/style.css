@@ -786,6 +786,52 @@ next jump). Inset top bar + ↕ glyph instead of a border colour: all four
 border states above already carry timestamp-alignment meaning. */
 .word-chip.has-jump { box-shadow: inset 0 3px 0 -1px var(--accent); }
 .word-chip.has-jump .word-text::after { content: ' \2195'; opacity: 0.7; }
+/* Find-bar match marker: bottom inset bar so it composes with the top
+inset jump marker and the border status colours. */
+.word-chip.find-match { box-shadow: inset 0 -3px 0 -1px var(--accent); }
+
+/* Find & replace bar under the Word Editor header. */
+.find-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: var(--space-1);
+    border-bottom: 1px solid var(--border);
+}
+.find-input {
+    flex: 1 1 90px;
+    min-width: 80px;
+    padding: 4px 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    background: var(--bg-page);
+    color: var(--text-primary);
+    font-size: var(--text-size-sm);
+}
+.find-arrow { color: var(--text-muted); font-size: var(--text-size-sm); }
+/* Compact buttons in the find bar (same size language as the CTC header
+buttons; scoped so no shared class is reused out of context). */
+.find-bar .btn-secondary {
+    padding: 3px 8px;
+    font-size: var(--text-size-xs);
+    white-space: nowrap;
+}
+.find-case {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: var(--text-size-xs);
+    color: var(--text-secondary);
+    white-space: nowrap;
+    cursor: pointer;
+}
+.find-count {
+    font-size: var(--text-size-xs);
+    color: var(--text-muted);
+    white-space: nowrap;
+    min-width: 64px;
+}
 
 /* Small explainer line under panel controls (e.g. the Position panel's
 vertical-jump pointer). */

@@ -164,6 +164,16 @@
                         <button id="btn-ctc-realign" class="btn-secondary btn-ctc hidden" title="Experimental: re-derive word timestamps from the audio with a CTC forced aligner">Realign timing <span class="exp-badge">exp</span></button>
                     </div>
                 </div>
+                <div class="find-bar" id="find-bar">
+                    <input type="text" id="find-input" class="find-input" placeholder="Find word…" spellcheck="false" title="Matches whole words (surrounding punctuation ignored), case-insensitive unless Aa is checked. Enter finds the next match.">
+                    <span class="find-arrow" aria-hidden="true">→</span>
+                    <input type="text" id="replace-input" class="find-input" placeholder="Replace with…" spellcheck="false" title="Replacement word (surrounding punctuation of each match is kept)">
+                    <label class="find-case" title="Match case"><input type="checkbox" id="find-case-sensitive"> Aa</label>
+                    <button id="btn-find-next" class="btn-secondary" title="Select the next match (Enter in the Find box)">Find</button>
+                    <button id="btn-replace-once" class="btn-secondary" title="Replace the next match and select it">Replace</button>
+                    <button id="btn-replace-all" class="btn-secondary" title="Replace every match in one undo step">Replace all</button>
+                    <span id="find-count" class="find-count" aria-live="polite"></span>
+                </div>
                 <div id="word-selector" class="word-selector">
                     <p class="placeholder">Import a video and transcribe to see the transcript here.</p>
                 </div>
