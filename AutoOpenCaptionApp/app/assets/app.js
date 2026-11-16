@@ -1,5 +1,6 @@
 import { FFmpegService } from './ffmpeg-service.js';
 import { whisperToTranscript, whisperWindowCount, makeWindowProgressStreamer } from './whisper-adapter.js';
+import { parseCaptionFile, buildImportedTranscript } from './caption-import.js';
 import { groupWords, findGroupAtTime, computeLayout, drawGroup, drawDiagnostics, resolveGroupYpx, baseYpx } from './caption-renderer.js';
 import { installResumableFetch, isFileCached } from './resumable-fetch.js';
 import { loadCtcAligner, alignCtcTranscript, CtcAlignerError, CTC_MODEL_ID } from './ctc-aligner.js';
@@ -578,6 +579,7 @@ const App = {
         document.getElementById('btn-import').addEventListener('click', () => this.importVideo());
         document.getElementById('btn-transcribe').addEventListener('click', () => this.transcribe());
         document.getElementById('btn-transcribe-model').addEventListener('click', () => this.transcribe());
+        document.getElementById('btn-import-captions').addEventListener('click', () => this.importCaptions());
         document.getElementById('btn-ctc-realign').addEventListener('click', () => this.realignWordTiming());
         document.getElementById('btn-ctc-revert').addEventListener('click', () => this.revertCtcTiming());
         document.getElementById('btn-play').addEventListener('click', () => this.togglePlay());
@@ -934,6 +936,99 @@ const App = {
         document.getElementById('drop-zone').classList.add('hidden');
     },
 
+    // ── Import captions (SRT / VTT) ─────────────────────────
+    // The "bring your own captions" path: parseCaptionFile +
+    // buildImportedTranscript (caption-import.js) do all the pure work;
+    // this method only reads the file, gets consent with the honest
+    // restriction notice, then commits the transcript behind the same
+    // UI-update sequence a finished transcription runs.
+    importCaptions() {
+        if (!this.videoFile) {
+            Status.warning('Load a video first — imported captions need a video to time against.');
+            return;
+        }
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.srt,.vtt';
+        input.onchange = (e) => {
+            const file = e.target.files[0];
+            if (file) this.loadCaptionFile(file);
+        };
+        input.click();
+    },
+
+    async loadCaptionFile(file) {
+        let text;
+        try {
+            text = await file.text();
+        } catch (err) {
+            Status.error(`Could not read "${file.name}": ${err.message}`);
+            return;
+        }
+        let parsed;
+        try {
+            parsed = parseCaptionFile(text);
+        } catch (err) {
+            Status.error(`Could not parse "${file.name}": ${err.message}`);
+            return;
+        }
+        if (!parsed.cues.length) {
+            Status.error(`No usable caption cues found in "${file.name}".`);
+            return;
+        }
+
+        // Restriction notice BEFORE replacing anything (parse already ran,
+        // so the cue count quoted here is real). Cancel leaves the current
+        // video and captions completely untouched.
+        const replacing = !!(this.transcript && this.transcript.words.length);
+        const ok = confirm(
+            `Import ${parsed.cues.length} caption${parsed.cues.length === 1 ? '' : 's'} from "${file.name}"` +
+            (replacing ? ` and REPLACE the current captions` : '') + '?\n\n' +
+            'Caption files only store timing for whole caption blocks, never per word:\n' +
+            '  \u2022 Word timing inside each block will be ESTIMATED (red-outlined words).\n' +
+            '  \u2022 Captions are re-wrapped by this app\u2019s line-grouping rules, which may\n' +
+            '    break lines differently than the original file.\n' +
+            '  \u2022 Text and timing stay fully editable; exports use your edits.\n' +
+            '  \u2022 "Realign timing" (CTC aligner) is not available for imported files.'
+        );
+        if (!ok) return;
+
+        const transcript = buildImportedTranscript(parsed, { sourceFile: file.name });
+        this.transcript = transcript;
+        this.transcriptMeta = {
+            model: `Imported ${parsed.format.toUpperCase()}`,
+            processingTime: null, audioSamples: null, audioDuration: null,
+        };
+        this._ctcSnapshot = null; // nothing to revert on a fresh import
+        this.findMatches = [];
+        this._refreshFindCount?.();
+        this.selectedWordIndex = -1;
+        // Undo slots from the previous captions would resurrect a different
+        // caption set — same reasoning as clearCaptions().
+        this.undoStack = [];
+        this.redoStack = [];
+
+        this.rebuildLayout();
+        this.renderTranscriptEditor();
+        this.renderTranscriptDisplay();
+        this.updateDiagnostics();
+        this.updateInspector();
+        this.updateCtcUi();
+        this.timeline?.invalidate();
+
+        document.getElementById('btn-export-srt').disabled = false;
+        document.getElementById('btn-export-vtt').disabled = false;
+        document.getElementById('btn-generate').disabled = false;
+        Pipeline.complete('transcribe');
+        Pipeline.complete('edit');
+
+        Status.success(`Imported ${transcript.timing.importedCues} captions (${transcript.words.length} words) from "${file.name}"`);
+        if (transcript.timing.clampedCues > 0) {
+            Status.warning(`${transcript.timing.clampedCues} caption ${transcript.timing.clampedCues === 1 ? 'block' : 'blocks'} overlapped the previous one — shifted forward so captions never overlap.`);
+        }
+        Status.warning('Word timings inside imported caption blocks are estimated (red outlines) — adjust a word or let the estimated timing stand, captions still show for the whole block.');
+    },
+
     // ── Timeline dock ───────────────────────────────────────
     bindTimeline() {
         this.timeline = new TimelineView(
@@ -1094,6 +1189,7 @@ const App = {
 
     onVideoLoaded() {
         document.getElementById('btn-transcribe').disabled = false;
+        document.getElementById('btn-import-captions').disabled = false;
         document.getElementById('btn-play').disabled = false;
         document.getElementById('scrubber').disabled = false;
         this.timeline?.setDuration(this.video.duration);
@@ -1423,7 +1519,9 @@ const App = {
         revert.disabled = !!this._ctcRunning;
         realign.title = supported
             ? 'Experimental: re-derive word timestamps from the audio with a CTC forced aligner'
-            : 'Experimental CTC realignment supports English only — transcribe with language "English" to enable it';
+            : (this.transcript && this.transcript.imported)
+                ? 'Realign timing is not available for imported caption files — realign works on transcriptions only'
+                : 'Experimental CTC realignment supports English only — transcribe with language "English" to enable it';
     },
 
     async realignWordTiming() {
@@ -2425,8 +2523,11 @@ const App = {
                 + (!word.deleted && word.captionY != null ? ' has-jump' : '')
                 + (findSet && findSet.has(i) ? ' find-match' : '');
             if (needsAttention) {
-                chip.title = 'Missing or collapsed timestamp — timing is estimated. '
-                    + 'Adjust the text, start, end, split or merge this word to mark it handled.';
+                chip.title = word.estimatedReason === 'caption-import'
+                    ? 'Timing comes from an imported caption file, which times whole blocks — this word timing is estimated. '
+                        + 'Adjust the text, start, end, split or merge this word to mark it handled.'
+                    : 'Missing or collapsed timestamp — timing is estimated. '
+                        + 'Adjust the text, start, end, split or merge this word to mark it handled.';
             } else if (adjusted) {
                 chip.title = 'Adjusted from the original transcript';
             }
