@@ -54,6 +54,29 @@ export const FFmpegService = {
         return wrapper.deleteFile(path);
     },
 
+    // FFmpeg's own log tail (see wrapper): cleared before each exec whose
+    // failure the user should see explained.
+    clearLogs() {
+        if (wrapper) wrapper.clearLogs();
+    },
+
+    getLogs() {
+        return wrapper ? wrapper.getLogs() : [];
+    },
+
+    /**
+     * Compact one-line summary of the most recent FFmpeg error lines,
+     * suitable for appending to a Status error. '' when nothing is known.
+     */
+    lastErrorSummary(maxLines = 3) {
+        const logs = this.getLogs();
+        const interesting = logs.filter((l) =>
+            /error|invalid|not found|not support|missing|cannot|failed|conversion failed/i.test(l) &&
+            !/Last message repeated/i.test(l));
+        const tail = interesting.slice(-maxLines);
+        return tail.length ? ' FFmpeg said: ' + tail.join(' | ') : '';
+    },
+
     async createDir(path) {
         return wrapper.createDir(path);
     },
