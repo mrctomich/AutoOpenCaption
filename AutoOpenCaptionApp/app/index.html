@@ -474,6 +474,20 @@
         </div>
     </div>
 
+    <!-- Offer to convert HEVC/AV1 sources to H.264 (WebCodecs). Same
+         ownership shape as the other modals: opens on codec sniff or on
+         a blocked export, Escape = keep as-is. -->
+    <div id="modal-transcode" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-transcode-title">
+        <div class="modal-card">
+            <h3 id="modal-transcode-title">Convert this video to H.264?</h3>
+            <p id="modal-transcode-detail"></p>
+            <div class="modal-actions">
+                <button id="btn-modal-transcode-keep" class="btn-secondary">Keep as-is</button>
+                <button id="btn-modal-transcode-convert" class="btn-primary">Convert to H.264</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Import-captions restriction notice: shown by loadCaptionFile before
          anything is replaced. A modal (not native confirm) so it sizes
          itself to the whole message — no scrolling. Escape cancels. -->

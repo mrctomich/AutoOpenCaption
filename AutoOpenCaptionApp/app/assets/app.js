@@ -9,6 +9,7 @@ import { TimelineView } from './timeline-view.js';
 import { commitProposal, planNewCaption, joinWordTexts } from './timeline-model.js';
 import { createPeakBuilder } from './waveform.js';
 import { detectFromSlices, wasmCanDecodeVideo, codecLabel, CAN_PLAY_TYPE_CODEC } from './codec-detect.js';
+import { webCodecsAvailable, transcodeToH264, MAX_TRANSCODE_BYTES } from './transcode-service.js';
 
 const waitForTransformers = () => new Promise((resolve) => {
     if (window.TransformersPipeline) {
@@ -665,6 +666,8 @@ const App = {
             .addEventListener('click', () => this.resolveCaptionChoice('clear'));
         document.getElementById('btn-modal-cancel-load')
             .addEventListener('click', () => this.resolveCaptionChoice(null));
+        document.getElementById('btn-modal-transcode-convert').addEventListener('click', () => this.resolveTranscode(true));
+        document.getElementById('btn-modal-transcode-keep').addEventListener('click', () => this.resolveTranscode(false));
         document.getElementById('btn-modal-import-ok')
             .addEventListener('click', () => this.resolveCaptionImport(true));
         document.getElementById('btn-modal-import-cancel')
@@ -934,10 +937,16 @@ const App = {
         // preview can play and whether export can ever succeed. Unknown
         // containers simply report nothing (legacy behavior).
         this._codecInfo = null;
+        this._codecFile = null;
+        if (this._transcodeAskResolve) this.resolveTranscode(false); // stale offer dies with the old video
         this._codecProbe = this.detectSourceCodec(file).then((info) => {
             if (this.videoFile !== file) return; // user already swapped videos
             this._codecInfo = info;
-            if (info) this.reportCodec(info);
+            this._codecFile = file;
+            if (info) {
+                this.reportCodec(info);
+                this.maybeOfferTranscode(file, info);
+            }
         }).catch(() => {});
         // New video ⇒ the previous transcript's cached audio and any
         // pending realign snapshot are stale.
@@ -1000,10 +1009,160 @@ const App = {
         const info = this._codecInfo;
         if (!info || !info.videoCodec) return null;
         if (wasmCanDecodeVideo(info.videoCodec) === false) {
-            return `${codecLabel(info.videoCodec)} video cannot be converted by the built-in video engine, so its captions cannot be burned in. `
-                + 'Transcribing and editing captions still work. To export, convert the video to H.264 first (for example with HandBrake).';
+            const convertible = this.needsTranscodeOffer(info) && this._codecFile === this.videoFile;
+            return 'The built-in video engine cannot decode ' + codecLabel(info.videoCodec) + ' video, so its captions cannot be burned in. '
+                + 'Transcribing and editing captions still work. '
+                + (convertible
+                    ? 'The "Convert to H.264" button converts it in one click in your browser; captions and timings are not affected.'
+                    : 'To export, convert the video to H.264 first (for example with HandBrake).');
         }
         return null;
+    },
+
+    /**
+     * Tier 2 (WebCodecs convert-on-import): offer a one-time in-browser
+     * conversion for MP4 sources whose video codec the wasm engine cannot
+     * decode (AV1) or decodes only painfully slowly (HEVC). The converted
+     * H.264 file then runs through the untouched classic pipeline.
+     */
+    needsTranscodeOffer(info) {
+        if (!info || info.container !== 'mp4') return false;
+        if (['hvc1', 'hev1', 'av01'].indexOf(info.videoCodec) === -1) return false;
+        return webCodecsAvailable();
+    },
+
+    transcodeOfferDetail(info) {
+        const label = codecLabel(info.videoCodec);
+        const wasmOk = wasmCanDecodeVideo(info.videoCodec);
+        const codecString = CAN_PLAY_TYPE_CODEC[info.videoCodec];
+        const browserOk = codecString ? this.video.canPlayType(codecString) !== '' : true;
+        if (wasmOk === false) {
+            return label + ' video cannot be read by the built-in video engine, so exporting burned-in captions is impossible as-is. '
+                + 'Converting now makes preview, transcription and export all work normally (hardware-accelerated when your browser provides a decoder, otherwise a software conversion at roughly playback speed). '
+                + 'Captions and timings are not affected.'
+                + (browserOk ? '' : ' Your browser also cannot play ' + label + ' — the preview stays black until this conversion is done.');
+        }
+        return label + ' video: everything works, but export runs through a software decoder that is several times slower than for H.264. '
+            + 'A one-time conversion keeps export fast and uses less memory. Optional — captions and timings are not affected.';
+    },
+
+    askTranscode(info) {
+        return new Promise((resolve) => {
+            this._transcodeAskResolve = resolve;
+            document.getElementById('modal-transcode-detail').textContent = this.transcodeOfferDetail(info);
+            document.getElementById('modal-transcode').classList.remove('hidden');
+            document.getElementById('btn-modal-transcode-convert').focus();
+        });
+    },
+
+    resolveTranscode(convert) {
+        if (!this._transcodeAskResolve) return; // already answered — no double-resolve
+        document.getElementById('modal-transcode').classList.add('hidden');
+        const resolve = this._transcodeAskResolve;
+        this._transcodeAskResolve = null;
+        resolve(!!convert);
+    },
+
+    async maybeOfferTranscode(file, info) {
+        if (this._transcodeAskResolve || this._transcoding) return;
+        if (this.videoFile !== file || !this.needsTranscodeOffer(info)) return;
+        if (this._transcodeDeclinedFile === file) return; // declined once for THIS file — stay quiet
+        const convert = await this.askTranscode(info);
+        if (this.videoFile !== file) return; // user swapped videos while the modal sat open
+        if (convert) await this.runTranscode(file);
+        else this._transcodeDeclinedFile = file;
+    },
+
+    /**
+     * Run the WebCodecs conversion and swap it in for the current video.
+     * Everything derived from the media element (preview, audio cache,
+     * waveform) is refreshed by applyVideoLoad; captions, transcript and
+     * playhead position survive because the content is identical.
+     */
+    async runTranscode(file) {
+        if (this._transcoding) return;
+        if (this._exportRunning || this._transcribeRunning || this._transcodeAskResolve) {
+            Status.warning('Wait for the current operation to finish before converting.');
+            return;
+        }
+        if (!file || file !== this.videoFile) return;
+        this._transcoding = true;
+        const control = { cancelled: false };
+        Progress.showProgress('Converting Video', 'Reading file…', () => { control.cancelled = true; });
+        try {
+            const blob = await transcodeToH264(file, {
+                onProgress: (frac, detail) => Progress.update(Math.round((frac || 0) * 100), detail),
+                control,
+            });
+            Progress.hide();
+            if (this.videoFile !== file) return; // swapped mid-conversion — drop the result
+            await this.swapInConverted(file, blob);
+        } catch (err) {
+            Progress.hide();
+            if (err && err.isCancelled) {
+                Status.msg('Conversion cancelled — the original video stays loaded.');
+                return;
+            }
+            // The browser has no decoder for this codec (HEVC without the
+            // system extension is the common case). The bundled FFmpeg wasm
+            // decodes it in software — slower (~real-time) but universal.
+            const codec = this._codecInfo && this._codecInfo.videoCodec;
+            if (wasmCanDecodeVideo(codec) && this.ffmpegLoaded) {
+                Status.msg(`Browser cannot decode ${codecLabel(codec)} — falling back to the built-in FFmpeg engine (slower, ~real-time).`);
+                try {
+                    const bytes = await this.transcodeWithFFmpeg(file);
+                    if (this.videoFile !== file) return;
+                    await this.swapInConverted(file, bytes);
+                } catch (err2) {
+                    Progress.hide();
+                    if (err2 && err2.isCancelled) Status.msg('Conversion cancelled — the original video stays loaded.');
+                    else Status.error(`Conversion failed: ${err2 && err2.message ? err2.message : err2}`);
+                }
+            } else {
+                Status.error(`Conversion failed: ${err && err.message ? err.message : err}`);
+            }
+        } finally {
+            this._transcoding = false;
+        }
+    },
+
+    // FFmpeg.wasm software transcode to H.264 (fallback when WebCodecs
+    // has no decoder). Returns the MP4 bytes.
+    async transcodeWithFFmpeg(file) {
+        // control is local: a cancel click can never leak into a later run.
+        const control = { cancelled: false };
+        Progress.showProgress('Converting Video (FFmpeg)', 'Reading file…', () => { control.cancelled = true; });
+        try {
+            const inputData = await fetchFile(file);
+            if (control.cancelled) { const e = new Error('cancelled'); e.isCancelled = true; throw e; }
+            const bytes = await FFmpegService.transcodeFile(inputData,
+                (frac) => Progress.update(Math.round(frac * 100), 'Software encode (H.264)…'));
+            if (control.cancelled) {
+                const e = new Error('cancelled'); e.isCancelled = true; throw e;
+            }
+            return bytes;
+        } finally {
+            Progress.hide();
+        }
+    },
+
+    // Shared tail of both conversion paths: wrap the H.264 result as a
+    // File, swap it in, pin the sniff, restore the playhead.
+    async swapInConverted(file, dataOrBlob) {
+        const base = file.name.replace(/\.[^.]+$/, '');
+        const blob = dataOrBlob instanceof Blob ? dataOrBlob : new Blob([dataOrBlob], { type: 'video/mp4' });
+        const converted = new File([blob], `${base}_h264.mp4`, { type: 'video/mp4' });
+        this.applyVideoLoad(converted);
+        // The converted file is definitively H.264 + AAC — pin the sniff
+        // so the export gate passes even before the fresh probe settles.
+        this._codecInfo = { container: 'mp4', videoCodec: 'avc1', audioCodec: 'mp4a' };
+        this._codecFile = converted;
+        this._codecProbe = Promise.resolve(this._codecInfo);
+        const wasTime = this.video.currentTime;
+        this.video.addEventListener('loadedmetadata', () => {
+            try { this.video.currentTime = wasTime; } catch { /* seek not ready yet — fine */ }
+        }, { once: true });
+        Status.success(`Converted to H.264 (${(blob.size / 1e6).toFixed(0)} MB) — preview, transcription and export all work on this file now.`);
     },
 
     // ── Import captions (SRT / VTT) ─────────────────────────
@@ -2319,7 +2478,14 @@ const App = {
         try { await this._codecProbe; } catch { /* probe failures never block */ }
         const gateMsg = this.exportCodecGate();
         if (gateMsg) {
-            Status.error(gateMsg);
+            // When a one-click fix exists, open it instead of only refusing:
+            // the user trying to export IS the moment they need the offer.
+            if (this.needsTranscodeOffer(this._codecInfo) && this._codecFile === this.videoFile
+                && !this._transcoding && !this._transcodeAskResolve) {
+                if (await this.askTranscode(this._codecInfo)) await this.runTranscode(this.videoFile);
+            } else {
+                Status.error(gateMsg);
+            }
             return;
         }
 
@@ -3400,6 +3566,14 @@ const App = {
                 if (e.key === 'Escape') {
                     e.preventDefault();
                     this.resolveCaptionImport(false);
+                }
+                return;
+            }
+            const transcodeModal = document.getElementById('modal-transcode');
+            if (transcodeModal && !transcodeModal.classList.contains('hidden')) {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    this.resolveTranscode(false);
                 }
                 return;
             }

@@ -167,7 +167,7 @@ function runExportGate(codecInfo, extra = {}) {
     const fn = new Function('codecLabel', 'wasmCanDecodeVideo',
         `return function () {${extractMethod('exportCodecGate')}}`);
     const mod = { codecLabel, wasmCanDecodeVideo };
-    const stub = Object.assign({ _codecInfo: codecInfo }, extra);
+    const stub = Object.assign({ _codecInfo: codecInfo, needsTranscodeOffer: () => false }, extra);
     return fn(mod.codecLabel, mod.wasmCanDecodeVideo).call(stub);
 }
 
@@ -175,6 +175,14 @@ test('exportCodecGate: refuses AV1 with an actionable message', () => {
     const msg = runExportGate({ container: 'mp4', videoCodec: 'av01', audioCodec: 'mp4a' });
     assert.ok(msg && msg.includes('AV1'), 'names the codec');
     assert.ok(msg.includes('H.264'), 'names the workaround');
+});
+
+test('exportCodecGate: when conversion is possible the message offers Convert', () => {
+    const msg = runExportGate({ container: 'mp4', videoCodec: 'av01' }, {
+        needsTranscodeOffer: () => true, _codecFile: 'v', videoFile: 'v',
+    });
+    assert.ok(msg && msg.includes('Convert'), 'offers the in-app Convert path');
+    assert.ok(!msg.includes('HandBrake first'), 'external tool no longer the primary advice');
 });
 
 test('exportCodecGate: supported AND unknown codecs are never gated', () => {
