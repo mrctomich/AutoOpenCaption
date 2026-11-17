@@ -668,6 +668,8 @@ const App = {
             .addEventListener('click', () => this.resolveCaptionChoice(null));
         document.getElementById('btn-modal-transcode-convert').addEventListener('click', () => this.resolveTranscode(true));
         document.getElementById('btn-modal-transcode-keep').addEventListener('click', () => this.resolveTranscode(false));
+        document.getElementById('btn-modal-save-converted-save').addEventListener('click', () => this.resolveSaveConverted(true));
+        document.getElementById('btn-modal-save-converted-dismiss').addEventListener('click', () => this.resolveSaveConverted(false));
         document.getElementById('btn-modal-import-ok')
             .addEventListener('click', () => this.resolveCaptionImport(true));
         document.getElementById('btn-modal-import-cancel')
@@ -1080,12 +1082,20 @@ const App = {
      * playhead position survive because the content is identical.
      */
     async runTranscode(file) {
-        if (this._transcoding) return;
+        // Every refusal says so — a conversion click that silently returns
+        // is indistinguishable from "nothing happens".
+        if (this._transcoding) {
+            Status.warning('A conversion is already running — wait for it to finish.');
+            return;
+        }
         if (this._exportRunning || this._transcribeRunning || this._transcodeAskResolve) {
             Status.warning('Wait for the current operation to finish before converting.');
             return;
         }
-        if (!file || file !== this.videoFile) return;
+        if (!file || file !== this.videoFile) {
+            Status.msg('The loaded video changed before converting started — load it again to get the offer back.');
+            return;
+        }
         this._transcoding = true;
         const control = { cancelled: false };
         Progress.showProgress('Converting Video', 'Reading file…', () => { control.cancelled = true; });
@@ -1119,7 +1129,10 @@ const App = {
                     else Status.error(`Conversion failed: ${err2 && err2.message ? err2.message : err2}`);
                 }
             } else {
-                Status.error(`Conversion failed: ${err && err.message ? err.message : err}`);
+                const hint = codec === 'av01'
+                    ? ' AV1 can only be converted by the browser itself: update Chrome/Edge (or enable hardware AV1), or convert with HandBrake first.'
+                    : '';
+                Status.error(`Conversion failed: ${err && err.message ? err.message : err}.${hint}`);
             }
         } finally {
             this._transcoding = false;
@@ -1163,6 +1176,74 @@ const App = {
             try { this.video.currentTime = wasTime; } catch { /* seek not ready yet — fine */ }
         }, { once: true });
         Status.success(`Converted to H.264 (${(blob.size / 1e6).toFixed(0)} MB) — preview, transcription and export all work on this file now.`);
+        // Nothing has been written to disk — the converted video is only a
+        // blob in this page's memory. Ask where the user wants a copy; the
+        // save click is a fresh gesture, which is what showSaveFilePicker
+        // needs (the long async conversion has long spent any activation).
+        this.askSaveConverted(converted).then((save) => {
+            if (save) this.saveConvertedFile(converted);
+        });
+    },
+
+    /**
+     * Post-conversion modal: where should the converted file be written?
+     * Same Promise-ownership shape as the other modals. Dismissing keeps
+     * the current behavior (session-memory only) — it loses nothing.
+     */
+    askSaveConverted(file) {
+        return new Promise((resolve) => {
+            this._saveConvertedResolve = resolve;
+            document.getElementById('modal-save-converted-detail').textContent =
+                `The converted H.264 file (${(file.size / 1e6).toFixed(0)} MB) lives inside the app only — nothing was written to disk yet. Choose a location to keep a copy; "Keep in session only" leaves just the loaded video.`;
+            document.getElementById('modal-save-converted').classList.remove('hidden');
+            document.getElementById('btn-modal-save-converted-save').focus();
+        });
+    },
+
+    resolveSaveConverted(save) {
+        if (!this._saveConvertedResolve) return; // already answered — no double-resolve
+        document.getElementById('modal-save-converted').classList.add('hidden');
+        const resolve = this._saveConvertedResolve;
+        this._saveConvertedResolve = null;
+        resolve(!!save);
+    },
+
+    /**
+     * Write the converted file where the user points: File System Access
+     * picker when the browser has one, plain browser download otherwise.
+     * Every branch ends in a Status line — this must never fail silently.
+     */
+    async saveConvertedFile(file) {
+        if (!file) return;
+        if (window.showSaveFilePicker) {
+            let handle = null;
+            try {
+                handle = await window.showSaveFilePicker({
+                    suggestedName: file.name,
+                    types: [{ description: 'MP4 Video', accept: { 'video/mp4': ['.mp4'] } }],
+                });
+            } catch (err) {
+                if (err && err.name === 'AbortError') {
+                    Status.msg('Not saved — the converted video stays loaded in the app only.');
+                    return;
+                }
+                // Real picker failure: fall through to the download path.
+            }
+            if (handle) {
+                const writable = await handle.createWritable();
+                await writable.write(file);
+                await writable.close();
+                Status.success(`Converted video saved to "${handle.name}".`);
+                return;
+            }
+        }
+        const url = URL.createObjectURL(file);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name;
+        a.click();
+        URL.revokeObjectURL(url);
+        Status.success(`Converted video downloaded as "${file.name}" — check your browser's download location.`);
     },
 
     // ── Import captions (SRT / VTT) ─────────────────────────
@@ -3574,6 +3655,14 @@ const App = {
                 if (e.key === 'Escape') {
                     e.preventDefault();
                     this.resolveTranscode(false);
+                }
+                return;
+            }
+            const saveConvertedModal = document.getElementById('modal-save-converted');
+            if (saveConvertedModal && !saveConvertedModal.classList.contains('hidden')) {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    this.resolveSaveConverted(false);
                 }
                 return;
             }

@@ -218,15 +218,20 @@ test('runTranscode success: hands the blob to swapInConverted', async () => {
     assert.equal(stub._transcoding, false);
 });
 
-test('swapInConverted: *_h264.mp4 name, pinned avc1 sniff, success status', async () => {
+test('swapInConverted: *_h264.mp4 name, pinned avc1 sniff, success status, save offer', async () => {
     const fn = new Function('File', 'Status',
         `return async function (file, dataOrBlob) {${extractMethod('swapInConverted', 'swapInConverted(file, dataOrBlob) {')}}`);
-    const stub = { loaded: null, video: { currentTime: 3, addEventListener() { } }, applyVideoLoad(f) { this.loaded = f; } };
+    const stub = {
+        loaded: null, video: { currentTime: 3, addEventListener() { } }, applyVideoLoad(f) { this.loaded = f; },
+        saveAsked: null,
+        async askSaveConverted(f) { this.saveAsked = f; return false; },
+    };
     await fn(FileStub(), makeStatus()).call(stub, { name: 'clip.hevc.mp4' }, new Blob(['abc'], { type: 'video/mp4' }));
     assert.equal(stub.loaded.name, 'clip.hevc_h264.mp4');
     assert.equal(stub._codecInfo.videoCodec, 'avc1');
     assert.equal(stub._codecFile, stub.loaded);
     assert.equal((await stub._codecProbe).videoCodec, 'avc1');
+    assert.equal(stub.saveAsked, stub.loaded, 'the user is asked where to save the converted copy');
 });
 function FileStub() { return class { constructor(parts, name) { this.name = name; this.size = 3; } }; }
 
@@ -323,4 +328,106 @@ test('vendored libraries and licenses are present', () => {
 test('app.js imports the service (offer + convert available at load)', () => {
     assert.ok(appSrc.includes("from './transcode-service.js'"));
     assert.ok(appSrc.includes('webCodecsAvailable'));
+});
+
+// ── save-the-converted-file modal (PR #26 feedback) ─────────────────────
+
+function saveFileHarness({ picker, file = { name: 'clip_h264.mp4', size: 5_000_000 } }) {
+    const Status = makeStatus();
+    const writes = [];
+    const clicks = [];
+    const window = picker ? { showSaveFilePicker: picker(writes) } : {};
+    const document = { createElement: () => { const a = { click() { clicks.push(a.download); } }; return a; } };
+    const URL = { createObjectURL: () => 'blob:x', revokeObjectURL() { } };
+    const fn = new Function('Status', 'window', 'document', 'URL',
+        `return async function (file) {${extractMethod('saveConvertedFile', 'saveConvertedFile(file) {')}}`);
+    return { Status, writes, clicks, run: () => fn(Status, window, document, URL)(file) };
+}
+
+test('saveConvertedFile: picker path writes the blob to the chosen handle', async () => {
+    let opts = null;
+    const h = saveFileHarness({
+        picker: (writes) => async (o) => {
+            opts = o;
+            return { name: 'my-choice.mp4', createWritable: async () => ({ write: (b) => { writes.push(b); }, close: async () => { } }) };
+        },
+    });
+    await h.run();
+    assert.equal(opts.suggestedName, 'clip_h264.mp4', 'suggested name is the converted file');
+    assert.equal(h.writes.length, 1, 'the converted blob was written');
+    assert.ok(h.Status.msgs.some(([k, m]) => k === 'success' && m.includes('my-choice.mp4')));
+    assert.equal(h.clicks.length, 0, 'no download fallback once the picker ran');
+});
+
+test('saveConvertedFile: picker cancel says so, nothing written', async () => {
+    const h = saveFileHarness({
+        picker: () => async () => { const e = new Error('cancel'); e.name = 'AbortError'; throw e; },
+    });
+    await h.run();
+    assert.equal(h.writes.length, 0);
+    assert.equal(h.clicks.length, 0);
+    assert.ok(h.Status.msgs.some(([k, m]) => k === 'msg' && m.includes('Not saved')));
+});
+
+test('saveConvertedFile: no picker falls back to a browser download', async () => {
+    const h = saveFileHarness({ picker: null });
+    await h.run();
+    assert.deepEqual(h.clicks, ['clip_h264.mp4'], 'anchor download carries the converted name');
+    assert.ok(h.Status.msgs.some(([k, m]) => k === 'success' && m.includes('downloaded')));
+});
+
+test('resolveSaveConverted: hides modal, resolves once, double-resolve is a no-op', async () => {
+    const ask = new Function('document', `return function (file) {${extractMethod('askSaveConverted', 'askSaveConverted(file) {')}}`);
+    const resolve = new Function('document', `return function (save) {${extractMethod('resolveSaveConverted', 'resolveSaveConverted(save) {')}}`);
+    const modals = [];
+    const document = { getElementById: (id) => ({ id, textContent: '', classList: { add: () => modals.push(['add', id]), remove: () => modals.push(['rm', id]) }, focus() { } }) };
+    const stub = {};
+    const p = ask(document).call(stub, { name: 'x_h264.mp4', size: 2_000_000 });
+    assert.equal(typeof stub._saveConvertedResolve, 'function');
+    resolve(document).call(stub, true);
+    resolve(document).call(stub, false); // must NOT overwrite the first answer
+    assert.equal(await p, true);
+    assert.equal(stub._saveConvertedResolve, null);
+    assert.ok(modals.some(([op, id]) => op === 'rm' && id === 'modal-save-converted'), 'modal shown (hidden class removed)');
+    assert.ok(modals.some(([op, id]) => op === 'add' && id === 'modal-save-converted'), 'modal hidden on resolve');
+});
+
+test('runTranscode refusals are never silent', async () => {
+    const Status = makeStatus();
+    const Progress = { showProgress() { }, update() { }, hide() { } };
+    const fn = new Function('Status', 'Progress', 'transcodeToH264', 'File', 'wasmCanDecodeVideo', 'codecLabel',
+        `return async function (file) {${extractMethod('runTranscode', 'runTranscode(file) {')}}`);
+    const file = { name: 'a.mp4' };
+    const busy = { _transcoding: true, _exportRunning: false, _transcribeRunning: false, _transcodeAskResolve: null, videoFile: file };
+    await fn(Status, Progress, async () => ({}), File, () => false, (c) => c).call(busy, file);
+    assert.ok(Status.msgs.some(([k, m]) => k === 'warning' && m.includes('already running')));
+    const stale = { _transcoding: false, _exportRunning: false, _transcribeRunning: false, _transcodeAskResolve: null, videoFile: { name: 'other.mp4' } };
+    await fn(Status, Progress, async () => ({}), File, () => false, (c) => c).call(stale, file);
+    assert.ok(Status.msgs.some(([k, m]) => k === 'msg' && m.includes('changed')));
+});
+
+test('AV1 conversion failure tells the user what to do next', async () => {
+    const { Status } = await runTranscodeHarness({
+        transcodeImpl: async () => { throw new Error('Could not start the av01 decoder'); },
+    });
+    assert.ok(Status.msgs.some(([k, m]) => k === 'error' && m.includes('AV1') && m.includes('HandBrake')));
+});
+
+// ── save-converted wiring source-guards ──────────────────────────────────
+
+test('index.html carries the save-converted modal with both buttons', () => {
+    assert.ok(htmlSrc.includes('id="modal-save-converted"'));
+    assert.ok(htmlSrc.includes('id="btn-modal-save-converted-save"'));
+    assert.ok(htmlSrc.includes('id="btn-modal-save-converted-dismiss"'));
+    assert.ok(htmlSrc.includes('id="modal-save-converted-detail"'));
+});
+
+test('bindEvents wires the save-converted buttons; keyboard guard owns it', () => {
+    assert.match(appSrc, /getElementById\('btn-modal-save-converted-save'\)\.addEventListener\('click', \(\) => this\.resolveSaveConverted\(true\)\)/);
+    assert.match(appSrc, /getElementById\('btn-modal-save-converted-dismiss'\)\.addEventListener\('click', \(\) => this\.resolveSaveConverted\(false\)\)/);
+    const kbAt = appSrc.indexOf('bindKeyboardShortcuts() {');
+    const guardAt = appSrc.indexOf("getElementById('modal-save-converted')", kbAt);
+    const activeAt = appSrc.indexOf('const ae = document.activeElement;', kbAt);
+    assert.ok(guardAt > kbAt && activeAt > guardAt, 'save-converted guard precedes shortcut dispatch');
+    assert.ok(appSrc.slice(guardAt, guardAt + 400).includes('this.resolveSaveConverted(false)'));
 });
