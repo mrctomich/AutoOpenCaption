@@ -148,7 +148,7 @@ test('needsTranscodeOffer: only mp4 hvc1/hev1/av01 with WebCodecs', () => {
 test('resolveTranscode: hides modal, resolves once, double-resolve is a no-op', async () => {
     const modals = [];
     const document = { getElementById: (id) => ({ id, textContent: '', classList: { add: () => modals.push(['add', id]), remove: () => modals.push(['rm', id]) }, focus() { } }) };
-    const ask = new Function('document', `return function (info) {${extractMethod('askTranscode', 'askTranscode(info) {')}}`);
+    const ask = new Function('document', `return function (info, contextNote) {${extractMethod('askTranscode', 'askTranscode(info, contextNote) {')}}`);
     const resolve = new Function('document', `return function (convert) {${extractMethod('resolveTranscode', 'resolveTranscode(convert) {')}}`);
     const stub = { transcodeOfferDetail: () => 'detail text' };
     const p = ask(document).call(stub, { videoCodec: 'av01', container: 'mp4' });
@@ -157,6 +157,21 @@ test('resolveTranscode: hides modal, resolves once, double-resolve is a no-op', 
     resolve(document).call(stub, false); // must NOT overwrite the first answer
     assert.equal(await p, true);
     assert.equal(stub._transcodeAskResolve, null);
+});
+
+test('askTranscode appends the export-context note to the detail line', () => {
+    const els = {};
+    const document = { getElementById: (id) => (els[id] = els[id] || { id, textContent: '', classList: { add() { }, remove() { } }, focus() { } }) };
+    const ask = new Function('document', `return function (info, contextNote) {${extractMethod('askTranscode', 'askTranscode(info, contextNote) {')}}`);
+    ask(document).call({ transcodeOfferDetail: () => 'base text.' }, {}, 'Generate video note.');
+    assert.equal(els['modal-transcode-detail'].textContent, 'base text. Generate video note.');
+});
+
+test('previewDecodeBlocked: only a dead 0x0 preview blocks export', () => {
+    const fn = new Function(`return function () {${extractMethod('previewDecodeBlocked', 'previewDecodeBlocked() {')}}`);
+    assert.equal(fn().call({ videoFile: { name: 'a.mp4' }, video: { videoWidth: 0, videoHeight: 0 } }), true);
+    assert.equal(fn().call({ videoFile: { name: 'a.mp4' }, video: { videoWidth: 1920, videoHeight: 1080 } }), false);
+    assert.equal(fn().call({ videoFile: null, video: { videoWidth: 0, videoHeight: 0 } }), false, 'no video loaded — nothing to block');
 });
 
 test('maybeOfferTranscode: decline remembers per-file; convert runs; stale file ignored', async () => {
@@ -207,16 +222,17 @@ function runTranscodeHarness({ transcodeImpl, videoSwapDuring = false, codec = '
         failTranscode(m, c) { this.filed = [m, c]; },
     };
     return fn(Status, Progress, transcodeToH264, FileStub, (c) => c === 'hvc1', (c) => c).call(stub, file)
-        .then(() => ({ stub, Status, Progress }));
+        .then((ret) => ({ stub, Status, Progress, ret }));
 }
 
 test('runTranscode success: hands the blob to swapInConverted', async () => {
     const blob = { size: 5_000_000 };
-    const { stub, Progress } = await runTranscodeHarness({ transcodeImpl: async () => blob });
+    const { stub, Progress, ret } = await runTranscodeHarness({ transcodeImpl: async () => blob });
     assert.equal(stub.swapped.length, 1);
     assert.equal(stub.swapped[0][1], blob);
     assert.ok(Progress.calls.some(([k]) => k === 'hide'));
     assert.equal(stub._transcoding, false);
+    assert.equal(ret, true, 'success return lets the export gate re-run after conversion');
 });
 
 test('swapInConverted: *_h264.mp4 name, pinned avc1 sniff, success status, save offer', async () => {
@@ -248,7 +264,7 @@ test('runTranscode failure on AV1 (no wasm decode) keeps the plain error — no 
 });
 
 test('runTranscode failure on HEVC (wasm can decode) falls back to FFmpeg and swaps the result', async () => {
-    const { stub, Status } = await runTranscodeHarness({
+    const { stub, Status, ret } = await runTranscodeHarness({
         codec: 'hvc1',
         transcodeImpl: async () => { throw new Error('This browser cannot decode hvc1'); },
     });
@@ -257,6 +273,7 @@ test('runTranscode failure on HEVC (wasm can decode) falls back to FFmpeg and sw
     assert.equal(stub.swapped[0][1].byteLength, 9);
     assert.ok(Status.msgs.some(([k, m]) => k === 'msg' && m.includes('falling back')));
     assert.ok(!Status.msgs.some(([k]) => k === 'error'), 'successful fallback is not an error');
+    assert.equal(ret, true, 'fallback success counts as success for the export gate');
 });
 
 test('runTranscode cancel keeps original and logs no error', async () => {
@@ -425,17 +442,23 @@ test('AV1 conversion failure tells the user what to do next (modal + log line)',
         return { els, document };
     };
     const { els, document } = mkDoc();
+    // failTranscode delegates to showFailureNotice — run the REAL one on the stub
+    const show = new Function('Status', 'document',
+        `return function (title, detail) {${extractMethod('showFailureNotice', 'showFailureNotice(title, detail) {')}}`);
     const fn = new Function('Status', 'document',
         `return function (message, codec) {${extractMethod('failTranscode', 'failTranscode(message, codec) {')}}`);
-    fn(Status, document)('Could not start the av01 decoder', 'av01');
+    const stub = { showFailureNotice: show(Status, document) };
+    fn(Status, document).call(stub, 'Could not start the av01 decoder', 'av01');
     const detail = els['modal-transcode-failed-detail'].textContent;
     assert.ok(detail.includes('AV1') && detail.includes('HandBrake'), 'actionable AV1 hint');
+    assert.equal(els['modal-transcode-failed-title'].textContent, 'Conversion failed', 'title element driven per failure');
     assert.equal(els['modal-transcode-failed'].hidden, false, 'failure modal shown');
     assert.ok(els['btn-modal-transcode-failed-ok'].focused, 'OK focused');
-    assert.ok(Status.msgs.some(([k, m]) => k === 'error' && m === detail), 'same text also lands in the log');
+    assert.ok(Status.msgs.some(([k, m]) => k === 'error' && m === 'Conversion failed: ' + detail), 'same text also lands in the log');
     // non-AV1 codec gets the neutral hint instead
     const r2 = mkDoc();
-    fn(Status, r2.document)('ffmpeg fallback died', 'hvc1');
+    const stub2 = { showFailureNotice: show(Status, r2.document) };
+    fn(Status, r2.document).call(stub2, 'ffmpeg fallback died', 'hvc1');
     assert.ok(r2.els['modal-transcode-failed-detail'].textContent.includes('HandBrake'));
     assert.ok(!r2.els['modal-transcode-failed-detail'].textContent.includes('AV1'));
     // closeTranscodeFailure hides it again
@@ -475,4 +498,16 @@ test('conversion failure modal: markup, OK wiring, keyboard guard, both branches
     assert.ok(appSrc.slice(guardAt, guardAt + 400).includes('this.closeTranscodeFailure()'));
     const rt = appSrc.slice(appSrc.indexOf('async runTranscode(file) {'), appSrc.indexOf('failTranscode(message, codec) {'));
     assert.equal((rt.match(/this\.failTranscode\(/g) || []).length, 2, 'WebCodecs branch AND FFmpeg-fallback branch both pop the modal');
+});
+
+test('HEVC keep-as-is export: preview gate pops BEFORE rendering, catch pops too', () => {
+    const gv = appSrc.slice(appSrc.indexOf('async generateVideo() {'), appSrc.indexOf('// ── Render Settings'));
+    assert.ok(gv.includes('if (this.previewDecodeBlocked()) {'), 'generateVideo gates on a dead preview');
+    const gateAt = gv.indexOf('if (this.previewDecodeBlocked()) {');
+    const pickerAt = gv.indexOf('showSaveFilePicker');
+    assert.ok(gateAt > 0 && pickerAt > gateAt, 'gate runs before the save-file picker creates an empty target');
+    assert.ok(gv.includes("this.showFailureNotice('Video export failed',"), 'export catch uses the failure popup, not just Status.error');
+    assert.ok(!/Status\.error\(`Video export failed: \$\{err\.message\}`\)/.test(gv), 'the old log-only line is gone');
+    const ro = appSrc.slice(appSrc.indexOf('async renderOverlayFrames('), appSrc.indexOf('async writeFramesToFFmpeg'));
+    assert.ok(ro.includes('if (!canvas.width || !canvas.height)'), 'last-resort honest error instead of null.arrayBuffer');
 });

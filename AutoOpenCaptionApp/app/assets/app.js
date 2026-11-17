@@ -1049,10 +1049,11 @@ const App = {
             + 'A one-time conversion keeps export fast and uses less memory. Optional — captions and timings are not affected.';
     },
 
-    askTranscode(info) {
+    askTranscode(info, contextNote) {
         return new Promise((resolve) => {
             this._transcodeAskResolve = resolve;
-            document.getElementById('modal-transcode-detail').textContent = this.transcodeOfferDetail(info);
+            document.getElementById('modal-transcode-detail').textContent =
+                this.transcodeOfferDetail(info) + (contextNote ? ' ' + contextNote : '');
             document.getElementById('modal-transcode').classList.remove('hidden');
             document.getElementById('btn-modal-transcode-convert').focus();
         });
@@ -1064,6 +1065,17 @@ const App = {
         const resolve = this._transcodeAskResolve;
         this._transcodeAskResolve = null;
         resolve(!!convert);
+    },
+
+    /**
+     * True when the loaded video's preview is dead (0×0): the browser
+     * cannot decode the codec at all, so overlay frames cannot be sized
+     * and a Generate-video attempt would crash mid-render. Ground truth
+     * from the video element, never a canPlayType guess.
+     */
+    previewDecodeBlocked() {
+        return !!this.videoFile
+            && this.video.videoWidth === 0 && this.video.videoHeight === 0;
     },
 
     async maybeOfferTranscode(file, info) {
@@ -1106,13 +1118,14 @@ const App = {
                 control,
             });
             Progress.hide();
-            if (this.videoFile !== file) return; // swapped mid-conversion — drop the result
+            if (this.videoFile !== file) return false; // swapped mid-conversion — drop the result
             await this.swapInConverted(file, blob);
+            return true;
         } catch (err) {
             Progress.hide();
             if (err && err.isCancelled) {
                 Status.msg('Conversion cancelled — the original video stays loaded.');
-                return;
+                return false;
             }
             // The browser has no decoder for this codec (HEVC without the
             // system extension is the common case). The bundled FFmpeg wasm
@@ -1122,8 +1135,9 @@ const App = {
                 Status.msg(`Browser cannot decode ${codecLabel(codec)} — falling back to the built-in FFmpeg engine (slower, ~real-time).`);
                 try {
                     const bytes = await this.transcodeWithFFmpeg(file);
-                    if (this.videoFile !== file) return;
+                    if (this.videoFile !== file) return false;
                     await this.swapInConverted(file, bytes);
+                    return true;
                 } catch (err2) {
                     Progress.hide();
                     if (err2 && err2.isCancelled) Status.msg('Conversion cancelled — the original video stays loaded.');
@@ -1147,8 +1161,16 @@ const App = {
         const hint = codec === 'av01'
             ? ' AV1 can only be converted by the browser itself — the built-in FFmpeg engine cannot decode AV1, so there is no fallback here. Update Chrome/Edge (or enable hardware AV1), or convert the file with HandBrake first.'
             : ' The original video stays loaded — you can convert it with HandBrake and load the result.';
-        const detail = `Conversion failed: ${message}.${hint}`;
-        Status.error(detail);
+        this.showFailureNotice('Conversion failed', `${message}.${hint}`);
+    },
+
+    /**
+     * Shared failure pop-up (conversion AND export): the same text in the
+     * log and in #modal-transcode-failed, whose title is set per failure.
+     */
+    showFailureNotice(title, detail) {
+        Status.error(`${title}: ${detail}`);
+        document.getElementById('modal-transcode-failed-title').textContent = title;
         document.getElementById('modal-transcode-failed-detail').textContent = detail;
         document.getElementById('modal-transcode-failed').classList.remove('hidden');
         document.getElementById('btn-modal-transcode-failed-ok').focus();
@@ -2588,6 +2610,31 @@ const App = {
             }
             return;
         }
+        // Preview-decode gate: burned-in captions are drawn on a canvas
+        // sized from the <video> element. A browser that cannot play the
+        // codec (HEVC without the system extension) leaves the preview at
+        // 0×0 and the overlay render dies on a null PNG mid-export. The
+        // wasm engine COULD decode the video — the overlay still cannot
+        // exist without the preview — so refuse up front: the one-click
+        // fix when it exists, an honest instruction when it does not.
+        // videoWidth is ground truth here, not a canPlayType guess.
+        if (this.previewDecodeBlocked()) {
+            if (this.needsTranscodeOffer(this._codecInfo) && this._codecFile === this.videoFile
+                && !this._transcoding && !this._transcodeAskResolve) {
+                const note = 'You clicked Generate video: burned-in captions cannot be rendered while the browser cannot play this video, so converting now is the way to unlock export.';
+                if (await this.askTranscode(this._codecInfo, note)) {
+                    if (await this.runTranscode(this.videoFile)) {
+                        Status.msg('Converted — press Generate video again to export.');
+                    }
+                }
+            } else {
+                this.showFailureNotice('Generate video needs an H.264 video',
+                    'Your browser cannot play ' + codecLabel(this._codecInfo && this._codecInfo.videoCodec)
+                    + ' video, and burned-in captions are rendered from the preview image, so this file cannot be exported as-is. '
+                    + 'Convert it to H.264 first (for example with HandBrake), load the converted file, and generate again.');
+            }
+            return;
+        }
 
         let cancelled = false;
         this._exportRunning = true;
@@ -2690,7 +2737,10 @@ const App = {
                 // pending exec with 'FFmpeg terminated' — that's expected.
                 Status.msg('Export cancelled', 'info');
             } else {
-                Status.error(`Video export failed: ${err.message}`);
+                // Export failure decides what the user does next — pop it,
+                // never bury it in the bottom log (user report).
+                this.showFailureNotice('Video export failed',
+                    err && err.message ? err.message : String(err));
             }
             Pipeline.deactivate('export');
         } finally {
@@ -2753,6 +2803,12 @@ const App = {
         const canvas = document.createElement('canvas');
         canvas.width = this.video.videoWidth;
         canvas.height = this.video.videoHeight;
+        // A 0×0 preview (browser cannot decode the codec) makes toBlob
+        // return null and the export dies as "Cannot read properties of
+        // null (reading 'arrayBuffer')" — say what is actually wrong.
+        if (!canvas.width || !canvas.height) {
+            throw new Error('The preview cannot display this video, so caption overlays cannot be rendered. Convert the video to H.264 first (load it again and accept the Convert offer, or use HandBrake), then export.');
+        }
         const ctx = canvas.getContext('2d');
 
         for (let i = 0; i < states.length; i++) {
