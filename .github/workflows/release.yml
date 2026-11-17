@@ -1,0 +1,68 @@
+name: Release
+
+# Runs when you push a tag like v0.1.1 (or v0.2.0-beta.1 for a pre-release).
+# Builds AutoOpenCaption-<tag>-windows.zip from the AutoOpenCaptionApp folder
+# and attaches it to a GitHub release. Whisper models are NOT bundled; the
+# app downloads them from Hugging Face on first use (see README).
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # needed to create the release and upload the zip
+
+env:
+  # Folder in the repo that holds exactly what goes in the zip:
+  #   Start AutoOpenCaption.bat, app/ (no model files), LICENSES/, ...
+  APP_DIR: AutoOpenCaptionApp
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify package contents
+        run: |
+          set -e
+          test -f "$APP_DIR/Start AutoOpenCaption.bat" || { echo "Missing Start AutoOpenCaption.bat in $APP_DIR"; exit 1; }
+          test -f "$APP_DIR/app/index.html"            || { echo "Missing app/index.html in $APP_DIR"; exit 1; }
+          test -f "$APP_DIR/app/wasm/ffmpeg-core.wasm" || { echo "Missing ffmpeg WASM core in $APP_DIR"; exit 1; }
+          test -d "$APP_DIR/app/presets"               || { echo "Missing app/presets in $APP_DIR"; exit 1; }
+          test -d "$APP_DIR/LICENSES"                  || { echo "Missing LICENSES/ in $APP_DIR"; exit 1; }
+          if [ -d "$APP_DIR/app/models" ]; then
+            echo "ERROR: app/models/ must not be committed — models ship via first-use download, not the zip."
+            exit 1
+          fi
+
+      - name: Build zip
+        run: |
+          set -e
+          mkdir -p dist
+          # The zip contains only the AutoOpenCaptionApp folder, nothing else from the repo
+          zip -r -q "dist/AutoOpenCaption-${GITHUB_REF_NAME}-windows.zip" "$APP_DIR" -x "*/.git*"
+          ls -lh dist/*.zip
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          FLAGS=""
+          # Tags with a hyphen (v0.2.0-beta.1) are marked as pre-releases
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then FLAGS="--prerelease"; fi
+
+          # If you keep hand-written notes in RELEASE_NOTES.md, they are used;
+          # otherwise GitHub auto-generates notes from commits.
+          if [ -f RELEASE_NOTES.md ]; then
+            NOTES="--notes-file RELEASE_NOTES.md"
+          else
+            NOTES="--generate-notes"
+          fi
+
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/AutoOpenCaption-${GITHUB_REF_NAME}-windows.zip" \
+            --title "AutoOpenCaption ${GITHUB_REF_NAME}" \
+            --verify-tag $NOTES $FLAGS
