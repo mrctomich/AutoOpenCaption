@@ -8,14 +8,16 @@ Local Browser Captioning Tool
 
 Quick Start
 -----------
-1. Double-click "Start AutoOpenCaption.bat"
+1. Download the latest release from
+   https://github.com/mrctomich/AutoOpenCaption/releases/latest and unzip it
+2. Double-click "Start AutoOpenCaption.bat"
    (Optional: double-click "Create Desktop Shortcut.bat" once to get a
    desktop shortcut with the app icon.)
-2. Your browser will open to http://localhost:8743
-3. Click "Import Video" or drag a video onto the preview area
-4. Click "Transcribe" to generate captions
-5. Edit words, adjust timing, and style your captions
-6. Click "Generate Video" to export with burned-in captions
+3. Your browser will open to http://localhost:8743
+4. Click "Import Video" or drag a video onto the preview area
+5. Click "Transcribe" to generate captions
+6. Edit words, adjust timing, and style your captions
+7. Click "Generate Video" to export with burned-in captions
 
 Requirements
 ------------
@@ -76,6 +78,24 @@ WebAssembly; a 3-minute 1080p clip can take 15-30+ minutes depending on
 your CPU. The progress bar shows real encoding progress and the encode
 can be cancelled mid-run.
 
+Experimental: Realign Word Timing
+---------------------------------
+The Word Editor has an experimental "Realign timing" button that
+re-derives word timestamps directly from the audio using a CTC forced
+aligner (wav2vec2-base-960h). The first click downloads a one-time
+~91 MB aligner model, cached in your browser like the Whisper models.
+English transcripts only — the button stays disabled for other
+languages. Words you adjusted manually keep YOUR timings, words the
+aligner is not confident about keep their Whisper timings, and
+"Revert timing" restores the whole pre-realign state. CTC timings are
+kept chronological: an aligned word is never stamped before the end of
+the previous word, so realign cannot create overlapping captions (kept
+Whisper timings are never moved; if one of those overlaps its
+neighbour you get a warning and can fix it in the inspector). Note:
+running the aligner alongside a loaded Whisper model increases peak
+browser memory; the confidence threshold is not yet calibrated on real
+audio.
+
 Style Presets
 -------------
 Presets are saved in your browser's IndexedDB storage. To transfer
@@ -124,4 +144,5 @@ Solution: Adjust font size and position in the Caption Style panel
 
 Support
 -------
-For issues or questions, check the README.txt or contact the developer.
+For issues or questions, open an issue at
+https://github.com/mrctomich/AutoOpenCaption/issues
