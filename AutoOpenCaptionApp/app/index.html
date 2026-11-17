@@ -474,6 +474,48 @@
         </div>
     </div>
 
+    <!-- Offer to convert HEVC/AV1 sources to H.264 (WebCodecs). Same
+         ownership shape as the other modals: opens on codec sniff or on
+         a blocked export, Escape = keep as-is. -->
+    <div id="modal-transcode" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-transcode-title">
+        <div class="modal-card">
+            <h3 id="modal-transcode-title">Convert this video to H.264?</h3>
+            <p id="modal-transcode-detail"></p>
+            <div class="modal-actions">
+                <button id="btn-modal-transcode-keep" class="btn-secondary">Keep as-is</button>
+                <button id="btn-modal-transcode-convert" class="btn-primary">Convert to H.264</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- After a conversion: where should the H.264 copy be written? The
+         converted file otherwise lives only in this page's memory. Same
+         ownership shape as the other modals, Escape = session-only. -->
+    <div id="modal-save-converted" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-save-converted-title">
+        <div class="modal-card">
+            <h3 id="modal-save-converted-title">Save the converted video?</h3>
+            <p id="modal-save-converted-detail"></p>
+            <div class="modal-actions">
+                <button id="btn-modal-save-converted-dismiss" class="btn-secondary">Keep in session only</button>
+                <button id="btn-modal-save-converted-save" class="btn-primary">Choose where to save…</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Conversion failure: a modal, not just a status-bar line — the
+         bottom log is easy to miss and this error decides what the user
+         does next (update the browser vs. convert elsewhere).
+         Escape or OK closes it; the original video stays loaded. -->
+    <div id="modal-transcode-failed" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-transcode-failed-title">
+        <div class="modal-card">
+            <h3 id="modal-transcode-failed-title">Conversion failed</h3>
+            <p id="modal-transcode-failed-detail"></p>
+            <div class="modal-actions">
+                <button id="btn-modal-transcode-failed-ok" class="btn-primary">OK</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Import-captions restriction notice: shown by loadCaptionFile before
          anything is replaced. A modal (not native confirm) so it sizes
          itself to the whole message — no scrolling. Escape cancels. -->

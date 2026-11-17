@@ -209,11 +209,15 @@ test('guard: the three modal buttons resolve keep/clear/null in bindEvents', () 
     assert.match(body, /getElementById\('btn-modal-cancel-load'\)[\s\S]{0,60}resolveCaptionChoice\(null\)\);/);
 });
 
-test('guard: applyVideoLoad is reachable only through the loadVideo gate', () => {
+test('guard: applyVideoLoad is reachable only through the loadVideo gate (or the content-identical transcode swap)', () => {
     const direct = [...appSrc.matchAll(/this\.applyVideoLoad\(/g)];
-    assert.equal(direct.length, 1,
-        'import paths must go through loadVideo, never straight to applyVideoLoad');
+    assert.equal(direct.length, 2,
+        'import paths go through loadVideo; the ONLY other caller is runTranscode swapping in a content-identical H.264 conversion (no caption prompt needed)');
     assert.match(loadVideoBody, /this\.applyVideoLoad\(file\);/);
+    const swStart = appSrc.indexOf('async swapInConverted(file, dataOrBlob) {');
+    const swBody = appSrc.slice(swStart, appSrc.indexOf('\n    },', swStart));
+    assert.ok(swStart > 0 && /this\.applyVideoLoad\(converted\);/.test(swBody),
+        'second caller must be swapInConverted (content-identical H.264 swap)');
 });
 
 test('guard: both import paths still route through loadVideo', () => {
