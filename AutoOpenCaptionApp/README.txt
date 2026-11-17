@@ -3,12 +3,16 @@ AutoOpenCaption - Local Browser Captioning Tool
 
 Quick Start
 -----------
-1. Double-click "Start AutoOpenCaption.bat"
-2. Your browser will open to http://localhost:8743
-3. Click "Import Video" or drag a video onto the preview area
-4. Click "Transcribe" to generate captions
-5. Edit words, adjust timing, and style your captions
-6. Click "Generate Video" to export with burned-in captions
+1. Download the latest release from
+   https://github.com/mrctomich/AutoOpenCaption/releases/latest and unzip it
+2. Double-click "Start AutoOpenCaption.bat"
+   (Optional: double-click "Create Desktop Shortcut.bat" once to get a
+   desktop shortcut with the app icon.)
+3. Your browser will open to http://localhost:8743
+4. Click "Import Video" or drag a video onto the preview area
+5. Click "Transcribe" to generate captions
+6. Edit words, adjust timing, and style your captions
+7. Click "Generate Video" to export with burned-in captions
 
 Requirements
 ------------
@@ -135,4 +139,5 @@ Solution: Adjust font size and position in the Caption Style panel
 
 Support
 -------
-For issues or questions, check the README.txt or contact the developer.
+For issues or questions, open an issue at
+https://github.com/mrctomich/AutoOpenCaption/issues
