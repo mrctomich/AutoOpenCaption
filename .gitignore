@@ -10,6 +10,16 @@ Archive/
 # Agent tooling
 .opencode/
 
+# Planning / handoff notes and working assets — local only
+/autoopencaption-web-execution-plan.md
+/handoff.md
+/IDEA.md
+/OriginalPrompt.txt
+/Icons/
+/Images/
+/Prototype/
+/AutoOpenCaptionApp/scratch/
+
 # OS junk
 Thumbs.db
 desktop.ini
