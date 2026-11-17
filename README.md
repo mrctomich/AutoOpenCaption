@@ -1,7 +1,7 @@
 # AutoOpenCaption
 
 <p align="center">
-  <img src="Icons/github-logo-256.png" width="128" alt="AutoOpenCaption icon">
+  <img src="Images/github-logo-256.png" width="128" alt="AutoOpenCaption icon">
 </p>
 
 Local Browser Captioning Tool
