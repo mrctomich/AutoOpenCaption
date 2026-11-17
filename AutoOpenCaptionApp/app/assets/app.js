@@ -670,6 +670,7 @@ const App = {
         document.getElementById('btn-modal-transcode-keep').addEventListener('click', () => this.resolveTranscode(false));
         document.getElementById('btn-modal-save-converted-save').addEventListener('click', () => this.resolveSaveConverted(true));
         document.getElementById('btn-modal-save-converted-dismiss').addEventListener('click', () => this.resolveSaveConverted(false));
+        document.getElementById('btn-modal-transcode-failed-ok').addEventListener('click', () => this.closeTranscodeFailure());
         document.getElementById('btn-modal-import-ok')
             .addEventListener('click', () => this.resolveCaptionImport(true));
         document.getElementById('btn-modal-import-cancel')
@@ -1126,17 +1127,35 @@ const App = {
                 } catch (err2) {
                     Progress.hide();
                     if (err2 && err2.isCancelled) Status.msg('Conversion cancelled — the original video stays loaded.');
-                    else Status.error(`Conversion failed: ${err2 && err2.message ? err2.message : err2}`);
+                    else this.failTranscode(err2 && err2.message ? err2.message : err2, codec);
                 }
             } else {
-                const hint = codec === 'av01'
-                    ? ' AV1 can only be converted by the browser itself: update Chrome/Edge (or enable hardware AV1), or convert with HandBrake first.'
-                    : '';
-                Status.error(`Conversion failed: ${err && err.message ? err.message : err}.${hint}`);
+                this.failTranscode(err && err.message ? err.message : err, codec);
             }
         } finally {
             this._transcoding = false;
         }
+    },
+
+    /**
+     * A real conversion failure decides what the user does next (update
+     * the browser vs. convert elsewhere), so it pops as a modal — a
+     * one-line status-bar entry is too easy to miss. Cancel never lands
+     * here; the original video always stays loaded untouched.
+     */
+    failTranscode(message, codec) {
+        const hint = codec === 'av01'
+            ? ' AV1 can only be converted by the browser itself — the built-in FFmpeg engine cannot decode AV1, so there is no fallback here. Update Chrome/Edge (or enable hardware AV1), or convert the file with HandBrake first.'
+            : ' The original video stays loaded — you can convert it with HandBrake and load the result.';
+        const detail = `Conversion failed: ${message}.${hint}`;
+        Status.error(detail);
+        document.getElementById('modal-transcode-failed-detail').textContent = detail;
+        document.getElementById('modal-transcode-failed').classList.remove('hidden');
+        document.getElementById('btn-modal-transcode-failed-ok').focus();
+    },
+
+    closeTranscodeFailure() {
+        document.getElementById('modal-transcode-failed').classList.add('hidden');
     },
 
     // FFmpeg.wasm software transcode to H.264 (fallback when WebCodecs
@@ -3663,6 +3682,14 @@ const App = {
                 if (e.key === 'Escape') {
                     e.preventDefault();
                     this.resolveSaveConverted(false);
+                }
+                return;
+            }
+            const transcodeFailModal = document.getElementById('modal-transcode-failed');
+            if (transcodeFailModal && !transcodeFailModal.classList.contains('hidden')) {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    this.closeTranscodeFailure();
                 }
                 return;
             }

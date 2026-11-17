@@ -204,6 +204,7 @@ function runTranscodeHarness({ transcodeImpl, videoSwapDuring = false, codec = '
         applyVideoLoad(f) { this.loaded = f; if (videoSwapDuring) this.videoFile = f; },
         async swapInConverted(f, data) { this.swapped.push([f, data]); if (videoSwapDuring) this.videoFile = f; },
         async transcodeWithFFmpeg(f) { this.ffmpegCalled = f; return { byteLength: 9, size: 9 }; },
+        failTranscode(m, c) { this.filed = [m, c]; },
     };
     return fn(Status, Progress, transcodeToH264, FileStub, (c) => c === 'hvc1', (c) => c).call(stub, file)
         .then(() => ({ stub, Status, Progress }));
@@ -241,7 +242,9 @@ test('runTranscode failure on AV1 (no wasm decode) keeps the plain error — no 
     });
     assert.equal(stub.swapped.length, 0);
     assert.equal(stub.ffmpegCalled, undefined, 'no FFmpeg fallback for codecs the wasm core cannot decode either');
-    assert.ok(Status.msgs.some(([k, m]) => k === 'error' && m.includes('cannot decode')));
+    assert.ok(stub.filed, 'failure also pops the modal, not just the log');
+    assert.ok(String(stub.filed[0]).includes('cannot decode'), 'error text preserved into the modal');
+    assert.ok(stub.filed[1] === 'av01', 'modal hint knows the codec');
 });
 
 test('runTranscode failure on HEVC (wasm can decode) falls back to FFmpeg and swaps the result', async () => {
@@ -263,6 +266,7 @@ test('runTranscode cancel keeps original and logs no error', async () => {
     assert.equal(cancelled.stub.swapped.length, 0);
     assert.ok(cancelled.Status.msgs.some(([k, m]) => k === 'msg' && m.toLowerCase().includes('cancelled')));
     assert.ok(!cancelled.Status.msgs.some(([k]) => k === 'error'), 'cancel is not an error');
+    assert.equal(cancelled.stub.filed, undefined, 'cancel never pops the failure modal');
 });
 
 test('runTranscode refuses while export/transcription is running', async () => {
@@ -406,11 +410,38 @@ test('runTranscode refusals are never silent', async () => {
     assert.ok(Status.msgs.some(([k, m]) => k === 'msg' && m.includes('changed')));
 });
 
-test('AV1 conversion failure tells the user what to do next', async () => {
-    const { Status } = await runTranscodeHarness({
-        transcodeImpl: async () => { throw new Error('Could not start the av01 decoder'); },
-    });
-    assert.ok(Status.msgs.some(([k, m]) => k === 'error' && m.includes('AV1') && m.includes('HandBrake')));
+test('AV1 conversion failure tells the user what to do next (modal + log line)', async () => {
+    const Status = makeStatus();
+    const mkDoc = () => {
+        const els = {};
+        const document = { getElementById: (id) => {
+            if (!els[id]) {
+                const el = { id, textContent: '', focus() { el.focused = true; } };
+                el.classList = { add() { el.hidden = true; }, remove() { el.hidden = false; } };
+                els[id] = el;
+            }
+            return els[id];
+        } };
+        return { els, document };
+    };
+    const { els, document } = mkDoc();
+    const fn = new Function('Status', 'document',
+        `return function (message, codec) {${extractMethod('failTranscode', 'failTranscode(message, codec) {')}}`);
+    fn(Status, document)('Could not start the av01 decoder', 'av01');
+    const detail = els['modal-transcode-failed-detail'].textContent;
+    assert.ok(detail.includes('AV1') && detail.includes('HandBrake'), 'actionable AV1 hint');
+    assert.equal(els['modal-transcode-failed'].hidden, false, 'failure modal shown');
+    assert.ok(els['btn-modal-transcode-failed-ok'].focused, 'OK focused');
+    assert.ok(Status.msgs.some(([k, m]) => k === 'error' && m === detail), 'same text also lands in the log');
+    // non-AV1 codec gets the neutral hint instead
+    const r2 = mkDoc();
+    fn(Status, r2.document)('ffmpeg fallback died', 'hvc1');
+    assert.ok(r2.els['modal-transcode-failed-detail'].textContent.includes('HandBrake'));
+    assert.ok(!r2.els['modal-transcode-failed-detail'].textContent.includes('AV1'));
+    // closeTranscodeFailure hides it again
+    const close = new Function('document', `return function () {${extractMethod('closeTranscodeFailure', 'closeTranscodeFailure() {')}}`);
+    close(document)();
+    assert.equal(els['modal-transcode-failed'].hidden, true, 'modal hidden after OK/Escape');
 });
 
 // ── save-converted wiring source-guards ──────────────────────────────────
@@ -430,4 +461,18 @@ test('bindEvents wires the save-converted buttons; keyboard guard owns it', () =
     const activeAt = appSrc.indexOf('const ae = document.activeElement;', kbAt);
     assert.ok(guardAt > kbAt && activeAt > guardAt, 'save-converted guard precedes shortcut dispatch');
     assert.ok(appSrc.slice(guardAt, guardAt + 400).includes('this.resolveSaveConverted(false)'));
+});
+
+test('conversion failure modal: markup, OK wiring, keyboard guard, both branches call it', () => {
+    assert.ok(htmlSrc.includes('id="modal-transcode-failed"'));
+    assert.ok(htmlSrc.includes('id="modal-transcode-failed-detail"'));
+    assert.ok(htmlSrc.includes('id="btn-modal-transcode-failed-ok"'));
+    assert.match(appSrc, /getElementById\('btn-modal-transcode-failed-ok'\)\.addEventListener\('click', \(\) => this\.closeTranscodeFailure\(\)\)/);
+    const kbAt = appSrc.indexOf('bindKeyboardShortcuts() {');
+    const guardAt = appSrc.indexOf("getElementById('modal-transcode-failed')", kbAt);
+    const activeAt = appSrc.indexOf('const ae = document.activeElement;', kbAt);
+    assert.ok(guardAt > kbAt && activeAt > guardAt, 'failure guard precedes shortcut dispatch');
+    assert.ok(appSrc.slice(guardAt, guardAt + 400).includes('this.closeTranscodeFailure()'));
+    const rt = appSrc.slice(appSrc.indexOf('async runTranscode(file) {'), appSrc.indexOf('failTranscode(message, codec) {'));
+    assert.equal((rt.match(/this\.failTranscode\(/g) || []).length, 2, 'WebCodecs branch AND FFmpeg-fallback branch both pop the modal');
 });
