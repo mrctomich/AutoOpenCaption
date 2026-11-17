@@ -41,19 +41,21 @@ entirely in your browser. No data is sent to any server.
 
 First-Time Use
 --------------
-The "base" Whisper model ships inside this zip (app/models/) and loads
-automatically when the app opens — no download needed to transcribe with
-base. The "tiny", "small", and "large" models download from Hugging Face
-on first use and are cached in your browser afterward.
+All four Whisper models download from Hugging Face on first use and
+are cached in your browser afterward. The default "base" model is a
+one-time ~135 MB download — expect an internet connection the first
+time you transcribe; later runs work offline from the browser cache.
 
-Managing models: app/models/ holds one folder per model —
-whisper-tiny, whisper-base, whisper-small, whisper-large-v3-turbo — each
-self-contained (config, tokenizer, and ONNX weights). Delete a folder to
-free its disk space; the app shows "Download" for any model whose folder
-is missing. To add a model by hand, drop its complete file tree into the
-matching folder (the same files as the bundled whisper-base folder).
-Browser-downloaded models are cached inside the browser (see "clear the
-cache" below), separate from app/models/.
+Managing models: app/models/ (create it next to app/ if you want
+one) can hold one folder per model — whisper-tiny, whisper-base,
+whisper-small, whisper-large-v3-turbo — each self-contained (config,
+tokenizer, and ONNX weights). The release zip ships without model files
+to keep the download small; if you have a model folder from an older
+AutoOpenCaption zip, drop its complete file tree into the matching
+folder and the app will use it instead of downloading. The app shows
+"Download" for any model it cannot find. Browser-downloaded models are
+cached inside the browser (see "clear the cache" below), separate from
+app/models/.
 
 Note: presets are stored in your browser. After updating AutoOpenCaption,
 previously-saved presets from an older version persist; clear site data
@@ -67,7 +69,7 @@ To clear the cache:
 Model Selection
 ---------------
 - tiny: ~65 MB, fastest, least accurate (downloads on first use)
-- base: bundled in this zip, good balance (default, loads automatically)
+- base: ~135 MB, good balance (default; downloads on first use)
 - small: ~510 MB, accurate, slower (downloads on first use)
 - large: ~3 GB, Whisper large-v3-turbo — best accuracy, still fast;
   needs a strong machine and a big one-time download (downloads on
