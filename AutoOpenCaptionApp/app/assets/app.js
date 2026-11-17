@@ -8,6 +8,7 @@ import { applyCtcResult, revertCtcResult, canCtcRealign } from './ctc-apply.js';
 import { TimelineView } from './timeline-view.js';
 import { commitProposal, planNewCaption, joinWordTexts } from './timeline-model.js';
 import { createPeakBuilder } from './waveform.js';
+import { detectFromSlices, wasmCanDecodeVideo, codecLabel, CAN_PLAY_TYPE_CODEC } from './codec-detect.js';
 
 const waitForTransformers = () => new Promise((resolve) => {
     if (window.TransformersPipeline) {
@@ -929,6 +930,15 @@ const App = {
         const url = URL.createObjectURL(file);
         this.video.src = url;
         this.videoFile = file;
+        // Codec sniff (async, never blocks the load): decides whether the
+        // preview can play and whether export can ever succeed. Unknown
+        // containers simply report nothing (legacy behavior).
+        this._codecInfo = null;
+        this._codecProbe = this.detectSourceCodec(file).then((info) => {
+            if (this.videoFile !== file) return; // user already swapped videos
+            this._codecInfo = info;
+            if (info) this.reportCodec(info);
+        }).catch(() => {});
         // New video ⇒ the previous transcript's cached audio and any
         // pending realign snapshot are stale.
         this._audioCache = null;
@@ -938,6 +948,62 @@ const App = {
         this.timeline?.setPeaks(null);
         this.timeline?.setDuration(0);
         document.getElementById('drop-zone').classList.add('hidden');
+    },
+
+    /**
+     * Sniff the source codec from the first and last megabytes (MP4 'moov'
+     * sits at the start with faststart, at the end with e.g. HandBrake
+     * defaults). Returns { container, videoCodec, audioCodec } or null.
+     */
+    async detectSourceCodec(file) {
+        const HEAD = 1024 * 1024;
+        const head = new Uint8Array(await file.slice(0, HEAD).arrayBuffer());
+        let tail = null;
+        if (file.size > HEAD) {
+            tail = new Uint8Array(await file.slice(Math.max(HEAD, file.size - HEAD)).arrayBuffer());
+        }
+        return detectFromSlices({ head, tail }, file.name || '');
+    },
+
+    /**
+     * One-line honest report after a codec sniff. Two independent failures:
+     *  - the BROWSER cannot play the codec → preview stays black (export
+     *    may still work — FFmpeg.wasm decodes it itself);
+     *  - FFmpeg.wasm cannot decode it → export is impossible (preview may
+     *    still work). AV1 hits the second; HEVC on a machine without a
+     *    hardware decoder hits the first.
+     */
+    reportCodec(info) {
+        if (!info.videoCodec) return;
+        const label = codecLabel(info.videoCodec);
+        const wasmOk = wasmCanDecodeVideo(info.videoCodec);
+        const codecString = CAN_PLAY_TYPE_CODEC[info.videoCodec];
+        const browserOk = codecString ? this.video.canPlayType(codecString) !== '' : true;
+        if (wasmOk === false) {
+            Status.error(`${label} video: the built-in video engine cannot decode it — video export is not possible for this file.`);
+            if (!browserOk) {
+                Status.error(`Also: your browser cannot play ${label} — the preview will stay black.`);
+            } else {
+                Status.warning('Preview and transcription still work for this file.');
+            }
+        } else if (wasmOk === true && !browserOk) {
+            Status.warning(`${label} video: your browser cannot play it, so the preview may stay black — export still works (the built-in converter decodes it).`);
+        }
+    },
+
+    /**
+     * Pre-export codec gate. Returns a user-facing refusal message, or
+     * null when export may proceed (codec supported OR unknown — unknown
+     * containers are never blocked on a guess).
+     */
+    exportCodecGate() {
+        const info = this._codecInfo;
+        if (!info || !info.videoCodec) return null;
+        if (wasmCanDecodeVideo(info.videoCodec) === false) {
+            return `${codecLabel(info.videoCodec)} video cannot be converted by the built-in video engine, so its captions cannot be burned in. `
+                + 'Transcribing and editing captions still work. To export, convert the video to H.264 first (for example with HandBrake).';
+        }
+        return null;
     },
 
     // ── Import captions (SRT / VTT) ─────────────────────────
@@ -1718,10 +1784,16 @@ const App = {
         await FFmpegService.writeFile('input.mp4', inputData);
 
         Progress.update(50, 'Converting to WAV');
-        await FFmpegService.exec([
+        FFmpegService.clearLogs();
+        const wavRet = await FFmpegService.exec([
             '-i', 'input.mp4', '-vn', '-acodec', 'pcm_s16le',
             '-ar', '16000', '-ac', '1', 'output.wav'
         ]);
+        if (wavRet !== 0) {
+            await FFmpegService.deleteFile('input.mp4').catch(() => {});
+            throw new Error('Could not extract audio from this video.'
+                + FFmpegService.lastErrorSummary());
+        }
 
         Progress.update(90, 'Reading audio data');
         const audioData = await FFmpegService.readFile('output.wav');
@@ -2241,6 +2313,15 @@ const App = {
             Status.warning('Another operation is already running');
             return;
         }
+        // Codec gate FIRST: refuse an impossible export before the save-file
+        // picker creates its (then forever-empty) target file. Await the sniff
+        // in case the user imported the video and hit export immediately.
+        try { await this._codecProbe; } catch { /* probe failures never block */ }
+        const gateMsg = this.exportCodecGate();
+        if (gateMsg) {
+            Status.error(gateMsg);
+            return;
+        }
 
         let cancelled = false;
         this._exportRunning = true;
@@ -2306,6 +2387,13 @@ const App = {
             Status.setActive('Finalizing MP4...');
 
             const outputData = await FFmpegService.readFile('output.mp4');
+            // An exec can exit 0 while having produced nothing decodable to
+            // write (e.g. every input frame failed to decode): a 0-byte
+            // result must NEVER be reported as a successful export.
+            if (!outputData || outputData.byteLength === 0) {
+                throw new Error('FFmpeg produced an empty output file.'
+                    + FFmpegService.lastErrorSummary());
+            }
             const blob = new Blob([outputData.buffer], { type: 'video/mp4' });
 
             if (fileHandle) {
@@ -2513,6 +2601,7 @@ const App = {
         if (rs.fps) baseArgs.push('-r', String(rs.fps));
 
         let ret;
+        FFmpegService.clearLogs();
         if (rs.audio === 'copy') {
             // Audio passthrough first; if the source audio codec isn't valid
             // in MP4 (e.g. Opus/Vorbis source), fall back to AAC re-encoding.
@@ -2520,6 +2609,7 @@ const App = {
             if (ret !== 0) {
                 Status.warning('Audio passthrough failed — re-encoding audio as AAC...');
                 await FFmpegService.deleteFile('output.mp4').catch(() => {});
+                FFmpegService.clearLogs();
                 ret = await FFmpegService.exec([...baseArgs, '-c:a', 'aac', '-b:a', '192k', '-y', 'output.mp4']);
             }
         } else {
@@ -2527,7 +2617,9 @@ const App = {
             ret = await FFmpegService.exec([...baseArgs, '-c:a', 'aac', '-b:a', bitrate, '-y', 'output.mp4']);
         }
         if (ret !== 0) {
-            throw new Error(`FFmpeg exited with code ${ret} (source audio codec may be unsupported by ffmpeg.wasm)`);
+            // ffmpeg's own last error lines are the only honest diagnosis
+            // (unsupported codec, corrupt stream, out of memory, ...).
+            throw new Error(`FFmpeg exited with code ${ret}.` + FFmpegService.lastErrorSummary());
         }
 
         await FFmpegService.deleteFile('source.mp4');

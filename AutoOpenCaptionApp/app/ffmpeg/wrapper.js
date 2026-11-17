@@ -14,6 +14,12 @@ export class FFmpegWrapper {
     #resolves = {};
     #rejects = {};
     #loaded = false;
+    // Ring buffer of the core's log lines. ffmpeg errors are otherwise
+    // invisible: an unsupported codec makes exec return non-zero (or OOM-
+    // kills the worker), and the user just sees a failed export with no
+    // reason. Kept capped so a chatty encode cannot grow memory.
+    #logs = [];
+    static #LOG_LIMIT = 300;
 
     /**
      * @param {string} workerURL - Path to the worker script (relative to page)
@@ -21,7 +27,36 @@ export class FFmpegWrapper {
     constructor(workerURL) {
         this.#worker = new Worker(workerURL);
         this.#worker.onmessage = (e) => this.#handleMessage(e);
-        this.#worker.onerror = (e) => console.error('FFmpeg worker error:', e);
+        // A dead worker never answers pending requests: reject them with a
+        // real error instead of leaving the export bar stuck forever (a
+        // silent hang reads to the user as "it is still working").
+        this.#worker.onerror = (e) => {
+            console.error('FFmpeg worker error:', e);
+            this.#failAllPending(new Error(
+                'FFmpeg worker crashed (the page ran out of memory, or the video is too large). ' +
+                'Try a shorter or lower-resolution video.'));
+            this.#loaded = false;
+        };
+    }
+
+    /** Recent FFmpeg log lines (oldest first), for error reporting. */
+    getLogs() {
+        return this.#logs.slice();
+    }
+
+    clearLogs() {
+        this.#logs.length = 0;
+    }
+
+    #failAllPending(err) {
+        if (!this.#worker) return;
+        this.#worker.terminate();
+        this.#worker = null;
+        for (const id of Object.keys(this.#rejects)) {
+            this.#rejects[id](err);
+            delete this.#rejects[id];
+            delete this.#resolves[id];
+        }
     }
 
     get loaded() {
@@ -119,7 +154,16 @@ export class FFmpegWrapper {
             return;
         }
         if (type === 'LOG') {
-            return; // ffmpeg log lines: too chatty for the UI, console-level only
+            // Keep a bounded tail of ffmpeg's own output; the app surfaces
+            // it whenever an exec fails. Message shape: { type, message }.
+            const line = (data && data.message) ? String(data.message).trimEnd() : String(data);
+            if (line) {
+                this.#logs.push(line);
+                if (this.#logs.length > FFmpegWrapper.#LOG_LIMIT) {
+                    this.#logs.splice(0, this.#logs.length - FFmpegWrapper.#LOG_LIMIT);
+                }
+            }
+            return;
         }
         if (id == null) return;
         if (type === 'ERROR') {
