@@ -1,10 +1,16 @@
 # AutoOpenCaption
 
+<p align="center">
+  <img src="Icons/github-logo-256.png" width="128" alt="AutoOpenCaption icon">
+</p>
+
 Local Browser Captioning Tool
 
 Quick Start
 -----------
 1. Double-click "Start AutoOpenCaption.bat"
+   (Optional: double-click "Create Desktop Shortcut.bat" once to get a
+   desktop shortcut with the app icon.)
 2. Your browser will open to http://localhost:8743
 3. Click "Import Video" or drag a video onto the preview area
 4. Click "Transcribe" to generate captions
