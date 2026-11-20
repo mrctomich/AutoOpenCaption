@@ -1,7 +1,7 @@
 import { FFmpegService } from './ffmpeg-service.js';
 import { whisperToTranscript, whisperWindowCount, makeWindowProgressStreamer } from './whisper-adapter.js';
 import { parseCaptionFile, buildImportedTranscript } from './caption-import.js';
-import { groupWords, findGroupAtTime, computeLayout, drawGroup, drawDiagnostics, resolveGroupYpx, baseYpx } from './caption-renderer.js';
+import { groupWords, findGroupAtTime, findWordAtTime, resolvePreviewCue, computeLayout, drawGroup, drawDiagnostics, resolveGroupYpx, baseYpx } from './caption-renderer.js';
 import { installResumableFetch, isFileCached } from './resumable-fetch.js';
 import { loadCtcAligner, alignCtcTranscript, CtcAlignerError, CTC_MODEL_ID } from './ctc-aligner.js';
 import { applyCtcResult, revertCtcResult, canCtcRealign } from './ctc-apply.js';
@@ -490,6 +490,17 @@ function planWordReplace(words, { search, replacement, caseSensitive = false } =
 }
 
 // ── Main App ────────────────────────────────────────────────
+// Inspector controls that only mean something for a selected word. The bar
+// itself never hides (see updateInspector), so these are what the idle state
+// switches off.
+const INSPECTOR_CONTROLS = [
+    'inspector-text', 'inspector-start', 'inspector-end',
+    'inspector-start-minus', 'inspector-start-plus',
+    'inspector-end-minus', 'inspector-end-plus',
+    'inspector-jump-y', 'inspector-jump-set', 'inspector-jump-clear',
+    'inspector-split', 'inspector-merge', 'inspector-delete',
+];
+
 const App = {
     video: null,
     timeline: null, // TimelineView dock (see timeline-view.js)
@@ -555,6 +566,7 @@ const App = {
         this.loadPresets();
         this.bindKeyboardShortcuts();
         this.bindInspectorControls();
+        this.updateInspector();       // start the bar in its idle (no selection) state
         this.bindFindReplaceControls();
         this.bindCenterResizer();
         this.bindTimeline();
@@ -610,27 +622,23 @@ const App = {
         this.video.addEventListener('play', () => this.startPreviewLoop());
         this.video.addEventListener('pause', () => this.stopPreviewLoop());
 
-        document.addEventListener('click', (e) => {
-            const selector = document.getElementById('word-selector');
-            const inspector = document.getElementById('word-inspector');
-            // The timeline dock manages its own selection (Phase 3): a box
-            // click selects via onTimelineSelectGroup, and this global
-            // outside-click deselect must not cancel it in the same event.
-            // The whole dock counts, not just the canvas: toolbar buttons
-            // (Sel/zoom) act ON the selection, and document-level click fires
-            // before the button's own handler — deselecting here would make
-            // zoom-to-selection always see an empty selection.
+        // Deselect on click-away. Keyed on PRESS (pointerdown), not click: the
+        // click event reports the nearest COMMON ANCESTOR of the press and
+        // release targets, so a text selection that drifted a few pixels out of
+        // an inspector field deselected the very word the user was editing.
+        // The whole Word Editor panel counts as "inside" — the inspector bar,
+        // the find bar and the chip list all live there, and a near-miss press
+        // on the bar's edge or its divider must not throw the selection away.
+        // The timeline dock counts too: it owns its own selection (Phase 3) and
+        // its toolbar buttons (Sel/zoom) act ON that selection — document-level
+        // handling fired before the button's own handler, which made
+        // zoom-to-selection always see an empty selection.
+        document.addEventListener('pointerdown', (e) => {
+            const wordPanel = document.querySelector('.panel-word-editor');
             const dock = document.getElementById('timeline-dock');
-            // The find bar's Find/Replace buttons act ON the selection too
-            // (they advance/replace at the selected word) — same exemption
-            // class as the timeline toolbar, or clicking Replace would
-            // deselect the word it just fixed.
-            const findBar = document.getElementById('find-bar');
-            if (!selector.contains(e.target) && !inspector.contains(e.target)
-                && !(dock && dock.contains(e.target))
-                && !(findBar && findBar.contains(e.target))) {
-                this.selectWord(-1);
-            }
+            if (wordPanel && wordPanel.contains(e.target)) return;
+            if (dock && dock.contains(e.target)) return;
+            this.selectWord(-1);
         });
 
         const dropZone = document.getElementById('drop-zone');
@@ -916,7 +924,7 @@ const App = {
         this.renderTranscriptEditor();
         this.renderTranscriptDisplay();
         this.updateDiagnostics();
-        this.updateInspector();        // hides the inspector
+        this.updateInspector();        // idle inspector bar (bar never hides)
         this.updateCtcUi();            // hides CTC realign/revert
         this.timeline?.invalidate();
         // The preview canvas still holds the last painted frame — wipe it so
@@ -1689,30 +1697,29 @@ const App = {
         this.ctx.clearRect(0, 0, width, height);
         if (!this.captionGroups.length) { this.highlightActiveWord(null); return; }
 
-        const groupIndex = findGroupAtTime(this.captionGroups, time);
-        if (groupIndex < 0) { this.highlightActiveWord(null); return; }
+        // Which cue to show. A word click seeks the playhead to that word's
+        // start, and the player can park a hair BEFORE the requested time
+        // (seeks quantize to the media's frame step) — inside the PREVIOUS cue,
+        // which previewed and highlighted the word before the one clicked.
+        // While paused, the selected word therefore decides; while playing,
+        // time alone does, so nothing ever leads the audio.
+        const preferredWordId = (this.video.paused && this.selectedWordIndex >= 0)
+            ? this.transcript.words[this.selectedWordIndex]?.id ?? null
+            : null;
+        const cue = resolvePreviewCue(this.captionGroups, time, { preferredWordId });
+        if (cue.groupIndex < 0) { this.highlightActiveWord(null); return; }
 
-        const group = this.captionGroups[groupIndex];
-        const layout = this.captionLayout[groupIndex];
+        const group = this.captionGroups[cue.groupIndex];
+        const layout = this.captionLayout[cue.groupIndex];
         if (!layout) return;
+        const activeWordIdx = group.words.findIndex(w => w.id === cue.wordId);
 
-        let activeWordId = null;
-        let activeWordIdx = -1;
-        for (let i = 0; i < group.words.length; i++) {
-            const w = group.words[i];
-            if (w.start <= time && w.end >= time) {
-                activeWordId = w.id;
-                activeWordIdx = i;
-                break;
-            }
-        }
+        drawGroup(this.ctx, layout, cue.wordId, this.style);
 
-        drawGroup(this.ctx, layout, activeWordId, this.style);
-
-        this.highlightActiveWord(activeWordId);
+        this.highlightActiveWord(cue.wordId);
 
         if (this.debugOverlay) {
-            drawDiagnostics(this.ctx, layout, groupIndex, activeWordIdx);
+            drawDiagnostics(this.ctx, layout, cue.groupIndex, activeWordIdx);
         }
     },
 
@@ -2777,12 +2784,10 @@ const App = {
 
             let activeWordId = null;
             if (group) {
-                for (const w of group.words) {
-                    if (w.start <= t && w.end >= t) {
-                        activeWordId = w.id;
-                        break;
-                    }
-                }
+                // Same boundary rule as the live preview, so the burned-in
+                // video activates a word at the instant the preview does.
+                const wi = findWordAtTime(group.words, t);
+                if (wi >= 0) activeWordId = group.words[wi].id;
             }
 
             const stateKey = `${groupId}|${activeWordId}`;
@@ -3136,22 +3141,42 @@ const App = {
         });
     },
 
+    /**
+     * The inspector bar is ALWAYS present at the bottom of the Word Editor.
+     * It used to be hidden until a word was selected, which made the panel
+     * jump — and when a stray click-away deselected the word mid-edit the bar
+     * vanished with the field the user was typing in. With no selection it
+     * renders idle: cleared fields, controls disabled, hint shown.
+     */
     updateInspector() {
         const inspector = document.getElementById('word-inspector');
-        
-        if (this.selectedWordIndex < 0 || !this.transcript) {
-            inspector.classList.add('hidden');
-            return;
-        }
-        
-        const word = this.transcript.words[this.selectedWordIndex];
+        const word = (this.selectedWordIndex >= 0 && this.transcript)
+            ? this.transcript.words[this.selectedWordIndex]
+            : null;
+        const enableControls = (on) => {
+            for (const id of INSPECTOR_CONTROLS) {
+                const el = document.getElementById(id);
+                if (el) el.disabled = !on;
+            }
+        };
+
         if (!word) {
-            inspector.classList.add('hidden');
+            inspector.classList.add('inspector-idle');
+            enableControls(false);
+            document.getElementById('inspector-text').value = '';
+            document.getElementById('inspector-start').value = '';
+            document.getElementById('inspector-end').value = '';
+            document.getElementById('inspector-jump-y').value = '';
+            document.getElementById('inspector-jump-y').placeholder = '';
+            document.getElementById('inspector-jump-hint').textContent = '';
+            document.getElementById('inspector-align-field').classList.add('hidden');
+            document.getElementById('inspector-align-note').textContent = '';
             return;
         }
-        
-        inspector.classList.remove('hidden');
-        
+
+        inspector.classList.remove('inspector-idle');
+        enableControls(true);
+
         document.getElementById('inspector-text').value = word.text;
         document.getElementById('inspector-start').value = word.start.toFixed(2);
         document.getElementById('inspector-end').value = word.end.toFixed(2);
@@ -3202,10 +3227,18 @@ const App = {
         textInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
+                // Consume the chord: blur() below drops focus to <body>, and
+                // the document-level handler reads activeElement only AFTER
+                // this handler — it saw "not editing" and did the global thing
+                // (Escape: deselect the word, wiping the field mid-edit).
+                e.stopPropagation();
                 textInput.blur();
             } else if (e.key === 'Escape') {
                 e.preventDefault();
-                textInput.value = this.transcript.words[this.selectedWordIndex].text;
+                e.stopPropagation();  // keep the selection: see Enter above
+                const w = this.selectedWordIndex >= 0
+                    ? this.transcript?.words?.[this.selectedWordIndex] : null;
+                textInput.value = w ? w.text : '';
                 textInput.blur();
             }
         });
@@ -3276,9 +3309,12 @@ const App = {
             commitJumpFromInput();
         });
         jumpInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') { e.preventDefault(); jumpInput.blur(); }
+            if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); jumpInput.blur(); }
             else if (e.key === 'Escape') {
                 e.preventDefault();
+                // Same reason as the text field above: the blur() hands focus
+                // back to <body>, so the global Escape must not also run.
+                e.stopPropagation();
                 this.updateInspector();
                 jumpInput.blur();
             }
