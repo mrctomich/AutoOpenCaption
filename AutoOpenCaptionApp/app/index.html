@@ -120,6 +120,8 @@
                 </label>
             </div>
 
+            <div id="left-top-resizer" class="row-resizer" title="Drag to resize panels"></div>
+
             <section class="panel panel-preview">
                 <h2>Preview</h2>
                 <div class="video-container">
@@ -230,6 +232,7 @@
 
         <!-- RIGHT COLUMN: Style Library, Effects, Position, Caption Style (merged) -->
         <div class="main-right">
+            <div id="right-top-group" class="right-top-group">
             <section class="panel panel-style-library">
                 <h2>Style Library</h2>
                 <div class="library-controls">
@@ -300,7 +303,9 @@
                         </label>
                     </fieldset>
                 </div>
-            </section>
+            </div>
+
+            <div id="right-top-resizer" class="row-resizer" title="Drag to resize panels"></div>
 
             <section class="panel panel-position">
                 <h2>Position</h2>
@@ -403,7 +408,11 @@
                     </label>
                 </div>
             </section>
+
         </div>
+
+        <div id="left-col-resizer" class="column-resizer column-resizer-left" title="Drag to resize panels"></div>
+        <div id="right-col-resizer" class="column-resizer column-resizer-right" title="Drag to resize panels"></div>
     </main>
 
     <!-- Timeline Dock (full-width, above status bar) -->

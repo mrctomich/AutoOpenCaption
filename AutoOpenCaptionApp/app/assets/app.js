@@ -569,6 +569,8 @@ const App = {
         this.updateInspector();       // start the bar in its idle (no selection) state
         this.bindFindReplaceControls();
         this.bindCenterResizer();
+        this.bindColumnResizers();
+        this.bindRowResizers();
         this.bindTimeline();
         this.updateModelStatus();
         this.updateThemeIcon();
@@ -850,6 +852,267 @@ const App = {
             document.addEventListener('mouseup', onUp);
             document.body.style.cursor = 'row-resize';
             document.body.style.userSelect = 'none';
+        });
+    },
+
+    // Vertical dividers between the main grid columns: left resizer splits
+    // Preview/Model | Transcript/Word Editor, right resizer splits those
+    // from the Style/Effects/Position panels. Side columns switch from fr
+    // to pixel widths (main.cols-resized), the center flexes, and the two
+    // widths persist in localStorage so the layout survives reloads.
+    bindColumnResizers() {
+        const main = document.querySelector('main');
+        const leftCol = document.querySelector('.main-left');
+        const rightCol = document.querySelector('.main-right');
+        const resizers = {
+            'left-col-resizer': { side: 'left', col: leftCol, min: 220 },
+            'right-col-resizer': { side: 'right', col: rightCol, min: 220 },
+        };
+        const els = {
+            left: document.getElementById('left-col-resizer'),
+            right: document.getElementById('right-col-resizer'),
+        };
+        const KEY = 'panelLayout';
+        const CENTER_MIN = 260; // keep in sync with minmax(260px, 1fr) in style.css
+        const stored = (() => {
+            try { return JSON.parse(localStorage.getItem(KEY) || 'null'); }
+            catch { return null; }
+        })();
+        const widths = { left: stored?.leftColW || null, right: stored?.rightColW || null };
+        // true once a saved layout exists OR the user drags: until then the
+        // grid keeps the fr defaults and the vars only position the handles.
+        let persisted = widths.left != null || widths.right != null;
+
+        // Pixel widths minus main's horizontal padding, then clamped so the
+        // center column never drops below CENTER_MIN on narrow windows.
+        // Widths are always mirrored into the CSS vars — without .cols-resized
+        // the grid ignores them (fr layout stays) and only the handle
+        // positions read them, which keeps handles exactly over the gaps.
+        const apply = () => {
+            const avail = main.clientWidth - 2 * parseFloat(getComputedStyle(main).paddingLeft);
+            if (widths.left == null) widths.left = leftCol.getBoundingClientRect().width;
+            if (widths.right == null) widths.right = rightCol.getBoundingClientRect().width;
+            if (persisted) {
+                const maxL = avail - CENTER_MIN - widths.right;
+                widths.left = Math.min(widths.left, Math.max(this.COL_RESIZE_MIN, maxL));
+                const maxR = avail - CENTER_MIN - widths.left;
+                widths.right = Math.min(widths.right, Math.max(this.COL_RESIZE_MIN, maxR));
+            }
+            main.classList.toggle('cols-resized', persisted);
+            main.style.setProperty('--left-col-w', `${widths.left}px`);
+            main.style.setProperty('--right-col-w', `${widths.right}px`);
+            scheduleSync();
+        };
+
+        // Keep both handles exactly centred on their column boundary. This
+        // measures the RENDERED columns (never derives from `widths`, which
+        // would feed sub-pixel layout rounding back into the widths), and
+        // re-syncs after every relayout of the columns — later init steps
+        // (timeline dock, saved state) change column widths after startup.
+        const syncHandles = () => {
+            if (main.offsetParent === null) return;
+            const mr = main.getBoundingClientRect();
+            if (!mr.width) return;
+            const lx = leftCol.getBoundingClientRect().right;
+            const rx = rightCol.getBoundingClientRect().left;
+            for (const [el, x] of [[els.left, lx], [els.right, rx]]) {
+                el.style.left = `${x - mr.left - el.offsetWidth / 2}px`;
+            }
+        };
+        let syncPending = false;
+        const scheduleSync = () => {
+            if (syncPending) return;
+            syncPending = true;
+            requestAnimationFrame(() => { syncPending = false; syncHandles(); });
+        };
+        if (typeof ResizeObserver !== 'undefined') {
+            const ro = new ResizeObserver(scheduleSync);
+            ro.observe(main);
+            ro.observe(leftCol);
+            ro.observe(rightCol);
+        }
+
+        for (const [id, { side, col, min }] of Object.entries(resizers)) {
+            const resizer = document.getElementById(id);
+            let startX = 0, startW = 0;
+
+            const onMove = (e) => {
+                const dx = e.clientX - startX;
+                const delta = side === 'left' ? dx : -dx;
+                // Mirror bindCenterResizer's clamp: hard min on this column,
+                // and leave the other side + center their room.
+                const max = main.clientWidth
+                    - 2 * parseFloat(getComputedStyle(main).paddingLeft)
+                    - CENTER_MIN - (side === 'left' ? (widths.right || 0) : (widths.left || 0));
+                widths[side] = Math.min(Math.max(min, startW + delta), Math.max(min, max));
+                apply();
+            };
+            const onUp = () => {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                resizer.classList.remove('dragging');
+                if (!persisted) return;
+                try {
+                    // read-modify-write: preserve the row-resizer keys
+                    let rec = null;
+                    try { rec = JSON.parse(localStorage.getItem(KEY) || 'null'); }
+                    catch { rec = null; }
+                    rec = rec && typeof rec === 'object' ? rec : {};
+                    rec.leftColW = Math.round(widths.left);
+                    rec.rightColW = Math.round(widths.right);
+                    localStorage.setItem(KEY, JSON.stringify(rec));
+                } catch { /* storage full/blocked — layout just won't persist */ }
+            };
+            resizer.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                startX = e.clientX;
+                startW = col.getBoundingClientRect().width;
+                // first drag from the fr layout: adopt the rendered widths
+                // (apply() already mirrored them into `widths`) and switch
+                // the grid to pixel mode from here on
+                persisted = true;
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+                resizer.classList.add('dragging');
+            });
+        }
+
+        apply(); // restore persisted widths before first meaningful paint
+        window.addEventListener('resize', apply);
+        scheduleSync();
+    },
+    COL_RESIZE_MIN: 180,
+
+    // Horizontal dividers INSIDE two columns (the center column already
+    // has bindCenterResizer between Transcript and Word Editor):
+    //  - left column:  toolbar/Preview split (resizes the Preview panel)
+    //  - right column: (Style Library + Effects) ⟷ (Position + Caption
+    //    Style); dragging up past the top snap-collapses the top group,
+    //    clicking the hidden divider expands it again.
+    // Heights persist in the same localStorage.panelLayout record as the
+    // column widths (single shared record object, see bindColumnResizers).
+    bindRowResizers() {
+        const KEY = 'panelLayout';
+        const COL_MIN = 120;
+        const record = () => {
+            let rec = null;
+            try { rec = JSON.parse(localStorage.getItem(KEY) || 'null'); }
+            catch { rec = null; }
+            return rec && typeof rec === 'object' ? rec : {};
+        };
+        const split = [
+            {
+                resizerId: 'left-top-resizer', targetSel: '.panel-preview',
+                hostSel: '.main-left', key: 'previewH', min: 140,
+                collapsed: null,
+                // divider sits ABOVE the panel it sizes: dragging down
+                // shrinks the Preview (the space above the seam grows)
+                invert: true,
+            },
+            {
+                resizerId: 'right-top-resizer', targetSel: '#right-top-group',
+                hostSel: '.main-right', key: 'rightTopH', min: 120,
+                collapsed: 'collapsed',
+            },
+        ];
+        let persisted = false; // true once a saved record exists OR user drags
+
+        const save = () => {
+            if (!persisted) return;
+            const rec = record();
+            for (const s of split) {
+                rec[s.key] = s.h != null && !s.isCollapsed() ? Math.round(s.h) : null;
+            }
+            try { localStorage.setItem(KEY, JSON.stringify(rec)); }
+            catch { /* storage full/blocked — layout just won't persist */ }
+        };
+
+        for (const s of split) {
+            s.el = document.querySelector(s.targetSel);
+            s.host = document.querySelector(s.hostSel);
+            s.resizerEl = document.getElementById(s.resizerId);
+            s.h = null;
+            s.isCollapsed = () =>
+                !!s.collapsed && s.el.classList.contains(s.collapsed);
+        }
+        const storedRec = record();
+        persisted = split.some((s) => Number.isFinite(storedRec[s.key]) && storedRec[s.key] > 0);
+
+        const applyH = (s, clamped) => {
+            if (s.h != null && clamped) {
+                s.h = Math.max(s.min, Math.min(s.h, s.host.clientHeight - s.min));
+            }
+            if (s.h != null) s.el.style.flex = `0 0 ${s.h}px`;
+            else s.el.style.removeProperty('flex');
+        };
+
+        for (const s of split) {
+            if (!s.resizerEl || !s.el || !s.host) continue;
+            let startY = 0, startH = 0;
+
+            const onMove = (e) => {
+                const dh = e.clientY - startY;
+                let h = startH + (s.invert ? -dh : dh);
+                const hostH = s.host.clientHeight;
+                if (s.collapsed && h < s.min * 0.45) {
+                    // collapse: hide the whole top group; divider stays
+                    // clickable to expand again
+                    s.h = 0;
+                    s.el.classList.add(s.collapsed);
+                    s.resizerEl.classList.add(s.collapsed);
+                    s.el.style.flex = '0 0 0px';
+                    return;
+                }
+                s.el.classList.remove(s.collapsed);
+                s.resizerEl.classList.remove(s.collapsed);
+                h = Math.min(Math.max(s.min, h), hostH - s.min);
+                s.h = h;
+                applyH(s, false);
+            };
+            const onUp = () => {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                s.resizerEl.classList.remove('dragging');
+                save();
+            };
+            s.resizerEl.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                persisted = true;
+                if (s.isCollapsed()) {
+                    // click on the collapsed seam = expand to a usable size
+                    s.el.classList.remove(s.collapsed);
+                    s.resizerEl.classList.remove(s.collapsed);
+                    s.h = Math.max(s.min, Math.round(s.host.clientHeight * 0.4));
+                    applyH(s, true);
+                    save();
+                    return;
+                }
+                startY = e.clientY;
+                startH = s.el.getBoundingClientRect().height;
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+                document.body.style.cursor = 'row-resize';
+                document.body.style.userSelect = 'none';
+                s.resizerEl.classList.add('dragging');
+            });
+
+            const stored = storedRec[s.key];
+            if (Number.isFinite(stored) && stored > 0) {
+                s.h = stored;
+                applyH(s, true);
+            } else {
+                applyH(s, false); // measure the sticky offset at startup
+            }
+        }
+
+        window.addEventListener('resize', () => {
+            for (const s of split) if (s.h != null) applyH(s, true);
         });
     },
 

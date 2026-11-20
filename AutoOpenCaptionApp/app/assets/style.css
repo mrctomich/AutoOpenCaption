@@ -408,6 +408,17 @@ main {
     padding: var(--space-1);
     overflow: hidden;
     min-height: 0;
+    position: relative; /* anchor for the column resizers */
+}
+
+/* Once the user drags a column divider, app.js adds .cols-resized and sets
+   these custom properties, switching the side columns from fractions to
+   pixel widths (unset = fall back to the default fr layout above). */
+main.cols-resized {
+    grid-template-columns:
+        var(--left-col-w, 1.3fr)
+        minmax(260px, 1fr)
+        var(--right-col-w, 1fr);
 }
 
 .main-left {
@@ -429,6 +440,27 @@ main {
     flex-direction: column;
     gap: var(--space-1);
     overflow-y: auto;
+}
+
+/* The right column scrolls, so its divider is sticky at the scroll top
+   (opaque + above panels while stuck). The left column is height-fixed by
+   the grid, so its divider just flows on the toolbar/preview seam; the
+   negative margins absorb the column gap so the grip centres on the seam. */
+/* margins of -(gap+1) pull the grip up onto the seam it splits */
+.main-right .row-resizer {
+    position: sticky;
+    top: 0;
+    margin: -10px 0;
+    padding: 2px 0;
+    flex-basis: 8px;
+    background: var(--bg-page);
+    z-index: 8;
+}
+
+.main-left .row-resizer {
+    flex-basis: 8px;
+    margin: -10px 0;
+    padding: 2px 0;
 }
 
 /* ── Panel (shared) ───────────────────────────────────── */
@@ -698,6 +730,97 @@ main {
 .center-resizer:active::after {
     opacity: 1;
     background: var(--accent);
+}
+
+/* ── Vertical column dividers (Preview|Transcript and Transcript|Style) ──
+   Absolutely positioned over the grid gaps so they never take a grid cell;
+   app.js drags them to resize the left/right columns of main. */
+.column-resizer {
+    position: absolute;
+    top: var(--space-1);
+    bottom: var(--space-1);
+    width: 13px;
+    cursor: col-resize;
+    z-index: 6;
+    background: transparent;
+}
+
+/* Fallback before app.js positions them (bindColumnResizers sets an exact
+   inline `left` from the measured column boundaries on every layout pass). */
+.column-resizer-left { left: 38%; }
+.column-resizer-right { left: 66%; }
+
+.column-resizer::after {
+    content: '';
+    position: absolute;
+    top: 45%;
+    bottom: 45%;
+    left: 50%;
+    width: 3px;
+    transform: translateX(-50%);
+    border-radius: 2px;
+    background: var(--border-strong);
+    opacity: 0.6;
+    transition: opacity 0.15s, background 0.15s;
+}
+
+.column-resizer:hover::after,
+.column-resizer.dragging::after {
+    opacity: 1;
+    background: var(--accent);
+}
+
+/* ── Horizontal row dividers inside the left/right columns ─────────────
+   Left column: toolbar ⟷ Preview. Right column: (Style Library +
+   Effects) ⟷ (Position + Caption Style). Same look as .center-resizer;
+   bindRowResizers() in app.js sets an explicit flex-basis on drag and
+   persists it in localStorage.panelLayout. */
+.row-resizer {
+    flex: 0 0 7px;
+    cursor: row-resize;
+    border-radius: 4px;
+    background: transparent;
+    position: relative;
+    z-index: 5;
+}
+
+.row-resizer::after {
+    content: '';
+    position: absolute;
+    left: 25%;
+    right: 25%;
+    top: 50%;
+    height: 3px;
+    transform: translateY(-50%);
+    border-radius: 2px;
+    background: var(--border-strong);
+    opacity: 0.6;
+    transition: opacity 0.15s, background 0.15s;
+}
+
+.row-resizer:hover::after,
+.row-resizer.dragging::after {
+    opacity: 1;
+    background: var(--accent);
+}
+
+/* Left column scrolls when the Preview is dragged shorter than the video */
+.main-left { overflow-y: auto; }
+
+/* Right column top group: its own scroll area so the divider behaves like
+   a split, not a scroll offset. Hidden (with its divider) when collapsed. */
+.right-top-group {
+    display: flex;
+    flex: 0 1 auto;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.right-top-group.collapsed,
+#right-top-resizer.collapsed {
+    display: none;
 }
 
 .transcript-text .placeholder {
