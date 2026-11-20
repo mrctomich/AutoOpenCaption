@@ -64,13 +64,70 @@ export function groupWords(words, grouping) {
     return groups;
 }
 
+/**
+ * Index of the cue that owns `time`, or -1 when nothing is on screen.
+ *
+ * A cue owns its own START instant. Adjacent cues share that boundary
+ * (previous.end === next.start) and a seek to a word's start lands exactly on
+ * such a boundary, so matching the FIRST cue that contains the time let the
+ * PREVIOUS cue win — clicking a word previewed the word before it. Ties at a
+ * shared boundary therefore go to the cue that starts there.
+ */
 export function findGroupAtTime(groups, time) {
+    let contained = -1;
     for (let i = 0; i < groups.length; i++) {
-        if (time >= groups[i].start && time <= groups[i].end) {
-            return i;
+        const g = groups[i];
+        if (time < g.start || time > g.end) continue;
+        if (g.start === time) return i;
+        if (contained < 0) contained = i;
+    }
+    return contained;
+}
+
+/**
+ * Index (within one cue's words) of the word being spoken at `time` — same
+ * "owns its own start instant" rule as findGroupAtTime, so a boundary time
+ * activates the incoming word, the one a seek to its start asked for.
+ */
+export function findWordAtTime(words, time) {
+    let contained = -1;
+    for (let i = 0; i < words.length; i++) {
+        const w = words[i];
+        if (time < w.start || time > w.end) continue;
+        if (w.start === time) return i;
+        if (contained < 0) contained = i;
+    }
+    return contained;
+}
+
+/**
+ * Cue to show in the PREVIEW at `time`, honouring a selection seek.
+ *
+ * `video.currentTime = word.start` is not exact: the player snaps the seek to
+ * the media's frame step, which can land a hair BEFORE the requested time —
+ * inside the PREVIOUS cue — so a time-only lookup previews the neighbour of
+ * the word the user just clicked. When the caller names the word the playhead
+ * was sent to (`preferredWordId`) and the playhead parks within `snapSec` of
+ * its start, that cue wins. Pass the id only for a paused playhead: while the
+ * video plays, time alone decides (nothing must lead the audio).
+ *
+ * Returns { groupIndex, wordId } — wordId is null when the cue is on screen
+ * but no word covers the time (a cue padded past its last word).
+ */
+export function resolvePreviewCue(groups, time, { preferredWordId = null, snapSec = 0.1 } = {}) {
+    if (preferredWordId != null) {
+        for (let i = 0; i < groups.length; i++) {
+            const w = (groups[i].words || []).find((x) => x.id === preferredWordId);
+            if (w && Math.abs(time - w.start) <= snapSec) {
+                return { groupIndex: i, wordId: w.id };
+            }
         }
     }
-    return -1;
+    const groupIndex = findGroupAtTime(groups, time);
+    if (groupIndex < 0) return { groupIndex: -1, wordId: null };
+    const words = groups[groupIndex].words || [];
+    const wi = findWordAtTime(words, time);
+    return { groupIndex, wordId: wi >= 0 ? words[wi].id : null };
 }
 
 // Global caption baseline in the 1080p reference frame (0 = very top,

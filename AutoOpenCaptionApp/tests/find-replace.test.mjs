@@ -277,9 +277,19 @@ test('guard: clearCaptions and transcribe reset the find state', () => {
     assert.match(appSrc.slice(tStart, tStart + 400), /this\.findMatches = \[\];/);
 });
 
-test('guard: outside-click deselect exempts the find bar (Replace acts ON the selection)', () => {
-    assert.match(appSrc, /const findBar = document\.getElementById\('find-bar'\);/);
-    assert.match(appSrc, /&& !\(findBar && findBar\.contains\(e\.target\)\)\) \{\n\s*this\.selectWord\(-1\);/);
+test('guard: click-away deselect exempts the whole Word Editor panel (find bar included)', () => {
+    // Press-based (pointerdown), because a click after a drag reports the
+    // COMMON ANCESTOR of press/release — that deselected the word the user was
+    // text-selecting in the inspector. The panel-wide exemption covers the
+    // find bar, the chip list and the inspector bar plus their padding.
+    const at = appSrc.indexOf("document.addEventListener('pointerdown'");
+    assert.ok(at >= 0, 'press-based click-away deselect handler not found');
+    const handler = appSrc.slice(at, appSrc.indexOf('\n        });', at));
+    assert.match(handler, /document\.querySelector\('\.panel-word-editor'\)/);
+    assert.match(handler, /if \(wordPanel && wordPanel\.contains\(e\.target\)\) return;/);
+    assert.match(handler, /this\.selectWord\(-1\);/);
+    assert.ok(!handler.includes("getElementById('find-bar')"),
+        'the panel-wide exemption replaces the per-element list');
 });
 
 test('guard: replace funnels commit through exactly one saveState each', () => {

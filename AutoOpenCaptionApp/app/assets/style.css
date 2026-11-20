@@ -486,6 +486,11 @@ main {
     color: var(--text-secondary);
     padding: 0 2px 2px;
 }
+/* updateInspector() toggles `hidden` on this row (CTC provenance note, and the
+   idle bar). Without a scoped rule the class did nothing, so an empty note box
+   kept a slot in the bar — the `.hidden` convention in this file is always
+   scoped to the component (see .diagnostics.hidden, .btn-ctc.hidden). */
+.inspector-align-note.hidden { display: none; }
 
 /* ── Transcript Toolbar (left column, above video) ────── */
 .transcript-toolbar {
@@ -870,7 +875,7 @@ vertical-jump pointer). */
 
 .inspector {
     flex-shrink: 0;
-    height: 130px;
+    min-height: 130px;
     padding: var(--space-1) var(--space-2);
     background: var(--bg-panel-raised);
     border-top: 1px solid var(--border);
@@ -880,7 +885,30 @@ vertical-jump pointer). */
     gap: 6px;
 }
 
-.inspector.hidden { display: none; }
+/* The bar is a permanent part of the Word Editor: it no longer hides when
+   nothing is selected (hiding it moved the field out from under the user
+   mid-edit and made the panel jump). Without a selection it goes IDLE —
+   dimmed, disabled controls plus a hint. There is deliberately no
+   `.inspector.hidden` rule: nothing may hide the bar. */
+.inspector.inspector-idle .inspector-field,
+.inspector.inspector-idle .inspector-actions { opacity: 0.5; }
+
+.inspector-hint {
+    align-self: center;
+    font-size: var(--text-size-xs);
+    font-style: italic;
+    color: var(--text-muted);
+    white-space: nowrap;
+    /* Reserved space in both states, so selecting a word never reflows the
+       bar. updateInspector() toggles the idle class. */
+    visibility: hidden;
+}
+
+.inspector.inspector-idle .inspector-hint { visibility: visible; }
+
+.inspector input:disabled {
+    cursor: not-allowed;
+}
 
 .inspector-content {
     display: flex;
@@ -900,6 +928,16 @@ vertical-jump pointer). */
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
+}
+
+/* The Vertical Jump hint swaps between 'inherits 540' and empty text. Laid out
+   inline that changed how the label wrapped, so selecting a word grew the bar
+   by a line. Give it its own reserved line so the bar is exactly as tall idle
+   as it is while editing. */
+.inspector-jump-hint {
+    display: block;
+    min-height: 1.2em;
+    line-height: 1.2em;   /* identical line box with and without text */
 }
 
 .inspector-text-input {

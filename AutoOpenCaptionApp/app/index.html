@@ -180,7 +180,7 @@
                     <p class="placeholder">Import a video and transcribe to see the transcript here.</p>
                 </div>
                 <div class="inspector-divider"></div>
-                <div class="inspector hidden" id="word-inspector">
+                <div class="inspector inspector-idle" id="word-inspector">
                     <div class="inspector-content">
                         <div class="inspector-field">
                             <label>Text</label>
@@ -218,6 +218,11 @@
                             <button id="inspector-merge" class="btn-secondary">Merge Next</button>
                             <button id="inspector-delete" class="btn-secondary btn-danger">Delete</button>
                         </div>
+                        <!-- Idle-state notice: the bar is always there, this says
+                             why its controls are switched off. Space is reserved
+                             in both states (visibility, not display) so selecting
+                             a word never shifts the bar's layout. -->
+                        <span class="inspector-hint" id="inspector-hint">Select a word to edit</span>
                     </div>
                 </div>
             </section>
