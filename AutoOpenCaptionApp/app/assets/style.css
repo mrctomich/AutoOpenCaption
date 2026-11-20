@@ -408,6 +408,17 @@ main {
     padding: var(--space-1);
     overflow: hidden;
     min-height: 0;
+    position: relative; /* anchor for the column resizers */
+}
+
+/* Once the user drags a column divider, app.js adds .cols-resized and sets
+   these custom properties, switching the side columns from fractions to
+   pixel widths (unset = fall back to the default fr layout above). */
+main.cols-resized {
+    grid-template-columns:
+        var(--left-col-w, 1.3fr)
+        minmax(260px, 1fr)
+        var(--right-col-w, 1fr);
 }
 
 .main-left {
@@ -696,6 +707,44 @@ main {
 
 .center-resizer:hover::after,
 .center-resizer:active::after {
+    opacity: 1;
+    background: var(--accent);
+}
+
+/* ── Vertical column dividers (Preview|Transcript and Transcript|Style) ──
+   Absolutely positioned over the grid gaps so they never take a grid cell;
+   app.js drags them to resize the left/right columns of main. */
+.column-resizer {
+    position: absolute;
+    top: var(--space-1);
+    bottom: var(--space-1);
+    width: 13px;
+    cursor: col-resize;
+    z-index: 6;
+    background: transparent;
+}
+
+/* Fallback before app.js positions them (bindColumnResizers sets an exact
+   inline `left` from the measured column boundaries on every layout pass). */
+.column-resizer-left { left: 38%; }
+.column-resizer-right { left: 66%; }
+
+.column-resizer::after {
+    content: '';
+    position: absolute;
+    top: 45%;
+    bottom: 45%;
+    left: 50%;
+    width: 3px;
+    transform: translateX(-50%);
+    border-radius: 2px;
+    background: var(--border-strong);
+    opacity: 0.6;
+    transition: opacity 0.15s, background 0.15s;
+}
+
+.column-resizer:hover::after,
+.column-resizer.dragging::after {
     opacity: 1;
     background: var(--accent);
 }
