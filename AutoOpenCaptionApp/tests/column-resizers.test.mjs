@@ -106,10 +106,11 @@ function runBinder(storage, colW = {}) {
 
 // Drag helper: mousedown on the resizer at x0, mousemove to x1 on
 // document (where the binder attaches move/up), then mouseup.
-function drag(doc, target, from, to) {
-    target.fire('mousedown', { clientX: from, preventDefault() {} });
-    doc.fire('mousemove', { clientX: to });
-    doc.fire('mouseup', {});
+function drag(doc, target, from, to, axis = 'x') {
+    const ev = (v) => axis === 'x' ? { clientX: v, clientY: 0 } : { clientX: 0, clientY: v };
+    target.fire('mousedown', { ...ev(from), preventDefault() {} });
+    doc.fire('mousemove', ev(to));
+    doc.fire('mouseup', ev(to));
 }
 
 test('no persisted layout: fr grid stays (no cols-resized) but handles are positioned', () => {
@@ -212,4 +213,137 @@ test('app.js wires bindColumnResizers in App.init and persists to localStorage',
     assert.match(body, /window\.addEventListener\('resize', apply\)/);
     // handles are positioned from measured boundaries, not CSS guesswork
     assert.match(body, /el\.style\.left = /);
+});
+
+// ── Row resizers (height dividers inside left/right columns) ─────────
+
+function runRowBinder(storage = {}) {
+    const makeEl = (props = {}) => {
+        const listeners = {};
+        const el = {
+            listeners,
+            handlers: (type) => listeners[type] || [],
+            fire(type, ev = {}) { for (const fn of this.handlers(type)) fn(ev); },
+            addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
+            removeEventListener(type, fn) {
+                listeners[type] = (listeners[type] || []).filter((f) => f !== fn);
+            },
+            style: {
+                setProperty(k, v) { this[k] = v; },
+                removeProperty(k) { delete this[k]; },
+                set flex(v) { this.__flex = v; }, get flex() { return this.__flex; },
+            },
+            classList: (() => {
+                const set = new Set();
+                return {
+                    set, add: (c) => set.add(c), remove: (c) => set.delete(c),
+                    contains: (c) => set.has(c),
+                };
+            })(),
+            offsetWidth: 13,
+            getBoundingClientRect: () => ({ width: 400, height: 300, left: 0, right: 400 }),
+            ...props,
+        };
+        return el;
+    };
+
+    const doc = makeEl();
+    doc.body = { style: {} };
+    const store = {
+        _data: { ...storage },
+        getItem: (k) => (k in store._data ? store._data[k] : null),
+        setItem: (k, v) => { store._data[k] = String(v); },
+    };
+    const preview = makeEl();
+    const rightGroup = makeEl();
+    const leftHost = makeEl({ clientHeight: 1000 });
+    const rightHost = makeEl({ clientHeight: 1000 });
+    const leftRes = makeEl();
+    const rightRes = makeEl();
+    const sandbox = {
+        document: Object.assign(doc, {
+            querySelector: (sel) => ({
+                '.panel-preview': preview, '#right-top-group': rightGroup,
+                '.main-left': leftHost, '.main-right': rightHost,
+            })[sel],
+            getElementById: (id) => ({ 'left-top-resizer': leftRes, 'right-top-resizer': rightRes })[id],
+        }),
+        window: makeEl(),
+        localStorage: store,
+    };
+    const start = appSrc.indexOf('bindRowResizers() {');
+    assert.ok(start >= 0, 'bindRowResizers not found in app.js');
+    const end = appSrc.indexOf('\n    },', start);
+    assert.ok(end > start, 'end of bindRowResizers not found');
+    const body = appSrc.slice(start + 'bindRowResizers() {'.length + 1, end);
+    const fn = new Function(
+        'document', 'window', 'localStorage',
+        `"use strict"; return function () {${body}};`,
+    )(sandbox.document, sandbox.window, sandbox.localStorage);
+    fn.call(sandbox);
+    return { doc, preview, rightGroup, leftHost, rightHost, leftRes, rightRes, store };
+}
+
+test('row resizers: startup without a saved record changes nothing and writes nothing', () => {
+    const { preview, rightGroup, store } = runRowBinder();
+    assert.equal(preview.style.flex, undefined);
+    assert.equal(rightGroup.style.flex, undefined);
+    assert.equal(store._data.panelLayout, undefined);
+});
+
+test('row resizers: saved heights are restored and clamped to the host', () => {
+    const { preview, rightGroup } = runRowBinder({
+        panelLayout: JSON.stringify({ previewH: 400, rightTopH: 5000 }),
+    });
+    assert.equal(preview.style.flex, '0 0 400px');
+    // 5000 clamped to host 1000 - min 120
+    assert.equal(rightGroup.style.flex, '0 0 880px');
+});
+
+test('row resizers: dragging the left divider resizes the Preview and persists the shared record', () => {
+    const { doc, preview, leftRes, store } = runRowBinder({
+        panelLayout: JSON.stringify({ leftColW: 700, rightColW: 300 }),
+    });
+    preview.getBoundingClientRect = () => ({ height: 300, width: 400, left: 0, right: 400 });
+    drag(doc, leftRes, 400, 460, 'y'); // drag DOWN shrinks the Preview
+    assert.equal(preview.style.flex, '0 0 240px');
+    const rec = JSON.parse(store._data.panelLayout);
+    assert.equal(rec.previewH, 240);
+    assert.equal(rec.leftColW, 700, 'column widths must survive the row save');
+    assert.equal(rec.rightColW, 300);
+});
+
+test('right group collapses when dragged near the top and re-expands on click', () => {
+    const { doc, rightGroup, rightRes } = runRowBinder();
+    rightGroup.getBoundingClientRect = () => ({ height: 300, width: 400, left: 0, right: 400 });
+    // drag far up -> collapse
+    drag(doc, rightRes, 400, 400 - 250, 'y');
+    assert.equal(rightGroup.classList.contains('collapsed'), true);
+    assert.equal(rightRes.classList.contains('collapsed'), true);
+    // click the seam -> expand to 40% of host (400px)
+    rightRes.fire('mousedown', { clientX: 10, clientY: 10, preventDefault() {} });
+    assert.equal(rightGroup.classList.contains('collapsed'), false);
+    assert.equal(rightGroup.style.flex, '0 0 400px');
+});
+
+test('row resizer source guards: markup, CSS, App.init wiring', () => {
+    assert.match(htmlSrc, /<div id="left-top-resizer" class="row-resizer"/);
+    // the left divider must sit on the toolbar/preview seam, not the column tail
+    assert.ok(htmlSrc.indexOf('left-top-resizer') < htmlSrc.indexOf('panel-preview'),
+        'left divider must flow before .panel-preview');
+    assert.match(htmlSrc, /<div id="right-top-resizer" class="row-resizer"/);
+    assert.match(htmlSrc, /<div id="right-top-group" class="right-top-group">/);
+    assert.match(cssSrc, /\.row-resizer\s*{[^}]*cursor: row-resize/);
+    assert.match(cssSrc, /\.right-top-group\s*{[^}]*overflow-y: auto/);
+    assert.match(cssSrc, /\.right-top-group\.collapsed/);
+    assert.match(appSrc, /this\.bindRowResizers\(\);/);
+    const start = appSrc.indexOf('bindRowResizers() {');
+    const body = appSrc.slice(start, appSrc.indexOf('\n    },', start));
+    assert.match(body, /localStorage\.setItem\(KEY/);
+    assert.match(body, /window\.addEventListener\('resize'/);
+});
+
+test('column resizers merge into the shared record instead of clobbering row keys', () => {
+    assert.match(appSrc, /rec\.leftColW = Math\.round\(widths\.left\)/);
+    assert.match(appSrc, /rec\.rightColW = Math\.round\(widths\.right\)/);
 });

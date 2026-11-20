@@ -442,6 +442,27 @@ main.cols-resized {
     overflow-y: auto;
 }
 
+/* The right column scrolls, so its divider is sticky at the scroll top
+   (opaque + above panels while stuck). The left column is height-fixed by
+   the grid, so its divider just flows on the toolbar/preview seam; the
+   negative margins absorb the column gap so the grip centres on the seam. */
+/* margins of -(gap+1) pull the grip up onto the seam it splits */
+.main-right .row-resizer {
+    position: sticky;
+    top: 0;
+    margin: -10px 0;
+    padding: 2px 0;
+    flex-basis: 8px;
+    background: var(--bg-page);
+    z-index: 8;
+}
+
+.main-left .row-resizer {
+    flex-basis: 8px;
+    margin: -10px 0;
+    padding: 2px 0;
+}
+
 /* ── Panel (shared) ───────────────────────────────────── */
 .panel {
     background: var(--bg-panel);
@@ -747,6 +768,59 @@ main.cols-resized {
 .column-resizer.dragging::after {
     opacity: 1;
     background: var(--accent);
+}
+
+/* ── Horizontal row dividers inside the left/right columns ─────────────
+   Left column: toolbar ⟷ Preview. Right column: (Style Library +
+   Effects) ⟷ (Position + Caption Style). Same look as .center-resizer;
+   bindRowResizers() in app.js sets an explicit flex-basis on drag and
+   persists it in localStorage.panelLayout. */
+.row-resizer {
+    flex: 0 0 7px;
+    cursor: row-resize;
+    border-radius: 4px;
+    background: transparent;
+    position: relative;
+    z-index: 5;
+}
+
+.row-resizer::after {
+    content: '';
+    position: absolute;
+    left: 25%;
+    right: 25%;
+    top: 50%;
+    height: 3px;
+    transform: translateY(-50%);
+    border-radius: 2px;
+    background: var(--border-strong);
+    opacity: 0.6;
+    transition: opacity 0.15s, background 0.15s;
+}
+
+.row-resizer:hover::after,
+.row-resizer.dragging::after {
+    opacity: 1;
+    background: var(--accent);
+}
+
+/* Left column scrolls when the Preview is dragged shorter than the video */
+.main-left { overflow-y: auto; }
+
+/* Right column top group: its own scroll area so the divider behaves like
+   a split, not a scroll offset. Hidden (with its divider) when collapsed. */
+.right-top-group {
+    display: flex;
+    flex: 0 1 auto;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.right-top-group.collapsed,
+#right-top-resizer.collapsed {
+    display: none;
 }
 
 .transcript-text .placeholder {
