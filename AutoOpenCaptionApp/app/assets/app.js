@@ -570,6 +570,7 @@ const App = {
         this.bindFindReplaceControls();
         this.bindCenterResizer();
         this.bindColumnResizers();
+        this.bindRowResizers();
         this.bindTimeline();
         this.updateModelStatus();
         this.updateThemeIcon();
@@ -954,7 +955,14 @@ const App = {
                 resizer.classList.remove('dragging');
                 if (!persisted) return;
                 try {
-                    localStorage.setItem(KEY, JSON.stringify({ leftColW: widths.left, rightColW: widths.right }));
+                    // read-modify-write: preserve the row-resizer keys
+                    let rec = null;
+                    try { rec = JSON.parse(localStorage.getItem(KEY) || 'null'); }
+                    catch { rec = null; }
+                    rec = rec && typeof rec === 'object' ? rec : {};
+                    rec.leftColW = Math.round(widths.left);
+                    rec.rightColW = Math.round(widths.right);
+                    localStorage.setItem(KEY, JSON.stringify(rec));
                 } catch { /* storage full/blocked — layout just won't persist */ }
             };
             resizer.addEventListener('mousedown', (e) => {
@@ -978,6 +986,135 @@ const App = {
         scheduleSync();
     },
     COL_RESIZE_MIN: 180,
+
+    // Horizontal dividers INSIDE two columns (the center column already
+    // has bindCenterResizer between Transcript and Word Editor):
+    //  - left column:  toolbar/Preview split (resizes the Preview panel)
+    //  - right column: (Style Library + Effects) ⟷ (Position + Caption
+    //    Style); dragging up past the top snap-collapses the top group,
+    //    clicking the hidden divider expands it again.
+    // Heights persist in the same localStorage.panelLayout record as the
+    // column widths (single shared record object, see bindColumnResizers).
+    bindRowResizers() {
+        const KEY = 'panelLayout';
+        const COL_MIN = 120;
+        const record = () => {
+            let rec = null;
+            try { rec = JSON.parse(localStorage.getItem(KEY) || 'null'); }
+            catch { rec = null; }
+            return rec && typeof rec === 'object' ? rec : {};
+        };
+        const split = [
+            {
+                resizerId: 'left-top-resizer', targetSel: '.panel-preview',
+                hostSel: '.main-left', key: 'previewH', min: 140,
+                collapsed: null,
+                // divider sits ABOVE the panel it sizes: dragging down
+                // shrinks the Preview (the space above the seam grows)
+                invert: true,
+            },
+            {
+                resizerId: 'right-top-resizer', targetSel: '#right-top-group',
+                hostSel: '.main-right', key: 'rightTopH', min: 120,
+                collapsed: 'collapsed',
+            },
+        ];
+        let persisted = false; // true once a saved record exists OR user drags
+
+        const save = () => {
+            if (!persisted) return;
+            const rec = record();
+            for (const s of split) {
+                rec[s.key] = s.h != null && !s.isCollapsed() ? Math.round(s.h) : null;
+            }
+            try { localStorage.setItem(KEY, JSON.stringify(rec)); }
+            catch { /* storage full/blocked — layout just won't persist */ }
+        };
+
+        for (const s of split) {
+            s.el = document.querySelector(s.targetSel);
+            s.host = document.querySelector(s.hostSel);
+            s.resizerEl = document.getElementById(s.resizerId);
+            s.h = null;
+            s.isCollapsed = () =>
+                !!s.collapsed && s.el.classList.contains(s.collapsed);
+        }
+        const storedRec = record();
+        persisted = split.some((s) => Number.isFinite(storedRec[s.key]) && storedRec[s.key] > 0);
+
+        const applyH = (s, clamped) => {
+            if (s.h != null && clamped) {
+                s.h = Math.max(s.min, Math.min(s.h, s.host.clientHeight - s.min));
+            }
+            if (s.h != null) s.el.style.flex = `0 0 ${s.h}px`;
+            else s.el.style.removeProperty('flex');
+        };
+
+        for (const s of split) {
+            if (!s.resizerEl || !s.el || !s.host) continue;
+            let startY = 0, startH = 0;
+
+            const onMove = (e) => {
+                const dh = e.clientY - startY;
+                let h = startH + (s.invert ? -dh : dh);
+                const hostH = s.host.clientHeight;
+                if (s.collapsed && h < s.min * 0.45) {
+                    // collapse: hide the whole top group; divider stays
+                    // clickable to expand again
+                    s.h = 0;
+                    s.el.classList.add(s.collapsed);
+                    s.resizerEl.classList.add(s.collapsed);
+                    s.el.style.flex = '0 0 0px';
+                    return;
+                }
+                s.el.classList.remove(s.collapsed);
+                s.resizerEl.classList.remove(s.collapsed);
+                h = Math.min(Math.max(s.min, h), hostH - s.min);
+                s.h = h;
+                applyH(s, false);
+            };
+            const onUp = () => {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                s.resizerEl.classList.remove('dragging');
+                save();
+            };
+            s.resizerEl.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                persisted = true;
+                if (s.isCollapsed()) {
+                    // click on the collapsed seam = expand to a usable size
+                    s.el.classList.remove(s.collapsed);
+                    s.resizerEl.classList.remove(s.collapsed);
+                    s.h = Math.max(s.min, Math.round(s.host.clientHeight * 0.4));
+                    applyH(s, true);
+                    save();
+                    return;
+                }
+                startY = e.clientY;
+                startH = s.el.getBoundingClientRect().height;
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+                document.body.style.cursor = 'row-resize';
+                document.body.style.userSelect = 'none';
+                s.resizerEl.classList.add('dragging');
+            });
+
+            const stored = storedRec[s.key];
+            if (Number.isFinite(stored) && stored > 0) {
+                s.h = stored;
+                applyH(s, true);
+            } else {
+                applyH(s, false); // measure the sticky offset at startup
+            }
+        }
+
+        window.addEventListener('resize', () => {
+            for (const s of split) if (s.h != null) applyH(s, true);
+        });
+    },
 
     importVideo() {
         const input = document.createElement('input');
